@@ -386,8 +386,20 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     }
     public async Task LeaveRoomAsync(CancellationToken cancellationToken = default)
     {
-        if (CurrentRoom is not null)
-            _ = await PostAsync<JsonElement>($"v1/rooms/{CurrentRoom.Code}/leave", new { }, true, cancellationToken);
+        var room = CurrentRoom;
+        if (room is not null)
+        {
+            try
+            {
+                _ = await PostAsync<JsonElement>($"v1/rooms/{room.Code}/leave", new { }, true, cancellationToken);
+            }
+            catch (InvalidOperationException exception) when (
+                exception.Message.Contains("room not found", StringComparison.OrdinalIgnoreCase))
+            {
+                // Older servers returned 404 after the host had already closed
+                // the room. Locally this is the same successful end state.
+            }
+        }
         CurrentRoom = null;
         RoomChanged?.Invoke(null);
         RoomExited?.Invoke("left");

@@ -642,6 +642,18 @@ func (s *Server) startRoom(w http.ResponseWriter, r *http.Request) {
 			hosts[member.Team] = member.PlayerID
 		}
 	}
+	if room.Rules.TeamSize == 1 {
+		ids := make([]string, 0, len(room.Members))
+		for _, member := range room.Members {
+			ids = append(ids, member.PlayerID)
+		}
+		s.Hub.Broadcast(ids, "entertainment_match_started", map[string]any{
+			"room": room, "first_steam_host_player_id": hosts[1], "second_steam_host_player_id": hosts[2],
+			"first_steam_lobby_id": "", "second_steam_lobby_id": "",
+		})
+		writeJSON(w, http.StatusOK, room)
+		return
+	}
 	s.roomLobbyMu.Lock()
 	s.roomLobbies[room.Code] = map[int]string{}
 	s.roomLobbyMu.Unlock()
@@ -697,7 +709,9 @@ func (s *Server) leaveRoom(w http.ResponseWriter, r *http.Request) {
 	code := strings.ToUpper(r.PathValue("code"))
 	before, err := s.Store.RoomSnapshot(r.Context(), code)
 	if err != nil {
-		writeError(w, 404, "room not found")
+		// Leaving is idempotent. The host may have closed the room before another
+		// member receives the realtime closure notification.
+		writeJSON(w, http.StatusOK, map[string]string{"state": "left"})
 		return
 	}
 	if err = s.Store.LeaveRoom(r.Context(), code, claims.PlayerID); err != nil {
