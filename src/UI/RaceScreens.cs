@@ -98,18 +98,19 @@ public static class RaceScreens
         _ = LoadLobbyAsync(page, kind, size, rules);
     }
 
-    private sealed class LobbyState(QueueKind kind, TeamSize size, RaceRuleSet rules, string localName)
+    private sealed class LobbyState(QueueKind kind, TeamSize size, RaceRuleSet rules, string localName, string localId)
     {
         public QueueKind Kind { get; } = kind;
         public TeamSize Size { get; } = size;
         public RaceRuleSet Rules { get; set; } = rules;
         public string LocalName { get; } = localName;
+        public string LocalId { get; } = localId;
     }
 
     private static async Task LoadLobbyAsync(RacePage page, QueueKind kind, TeamSize size, RaceRuleSet rules)
     {
         var identity = await page.Controller.Services.IdentityProvider.GetLocalIdentityAsync();
-        var state = new LobbyState(kind, size, rules, identity.DisplayName);
+        var state = new LobbyState(kind, size, rules, identity.DisplayName, identity.PlatformId.ToString());
         if (page.Controller.Services is IRacePartyService parties)
         {
             void Changed(RaceParty? _) => Defer(page, () => RenderLobby(page, state));
@@ -188,6 +189,7 @@ public static class RaceScreens
                     state.Rules with { CharacterPolicy = selectedCharacter }, selectedCharacter));
             },
             25, new Vector2(250, 66));
+        queue.SetEnabled(party is null || party.LeaderPlayerId == state.LocalId);
         queue.NormalTint = new Color("7b632c");
         queue.FocusTint = new Color("b59643");
         actions.AddChild(invite);

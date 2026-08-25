@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Screens.CharacterSelect;
 using MegaCrit.Sts2.Core.Nodes.Screens.CustomRun;
+using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Logging;
 using Sts2SpireRace.Core;
@@ -15,7 +16,7 @@ namespace Sts2SpireRace.Game;
 
 public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyCoordinator, IRaceEntertainmentP2PLauncher
 {
-    private readonly Dictionary<string, NetHostGameService> _pendingSteamHosts = new();
+    private readonly Dictionary<string, NSubmenu> _pendingSteamScreens = new();
 
     public Task LaunchAsync(QueueRequest request, RaceTeam localTeam, RaceTeam opponentTeam, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
@@ -64,7 +65,26 @@ public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyC
             service.Disconnect(NetError.InternalError, true);
             throw new InvalidOperationException("Steam returned an invalid lobby identifier.");
         }
-        _pendingSteamHosts[assignment.MatchId] = service;
+        var game = NGame.Instance ?? throw new InvalidOperationException("The game scene is not available.");
+        var mainMenu = game.MainMenu ?? throw new InvalidOperationException("The main menu is not available.");
+        NSubmenu screen;
+        if (assignment.Kind == QueueKind.Entertainment)
+        {
+            var custom = mainMenu.SubmenuStack.GetSubmenuType<NCustomRunScreen>();
+            custom.InitializeMultiplayerAsHost(service, (int)assignment.TeamSize);
+            custom.Lobby.SyncAscensionChange(assignment.Rules.Ascension);
+            custom.Lobby.SetSeed(assignment.Rules.RandomSeed ? null : assignment.Rules.Seed);
+            custom.Lobby.SetModifiers(ResolveModifiers(assignment.Rules.Modifiers));
+            screen = custom;
+        }
+        else
+        {
+            var standard = mainMenu.SubmenuStack.GetSubmenuType<NCharacterSelectScreen>();
+            standard.InitializeMultiplayerAsHost(service, (int)assignment.TeamSize);
+            standard.Lobby.SyncAscensionChange(assignment.Rules.Ascension);
+            screen = standard;
+        }
+        _pendingSteamScreens[assignment.MatchId] = screen;
         return lobbyId;
     }
 
@@ -99,14 +119,12 @@ public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyC
         if (assignment.Kind != QueueKind.Entertainment)
             RaceActiveSession.Begin(assignment);
         game.DebugSeedOverride = assignment.Rules.Seed;
-        var screen = mainMenu.SubmenuStack.GetSubmenuType<NCharacterSelectScreen>();
         var isHost = localPlayer.Id == assignment.FirstSteamHostPlayerId || localPlayer.Id == assignment.SecondSteamHostPlayerId;
         if (isHost)
         {
-            if (!_pendingSteamHosts.Remove(assignment.MatchId, out var hostService))
+            if (!_pendingSteamScreens.Remove(assignment.MatchId, out var hostScreen))
                 throw new InvalidOperationException("The prepared Steam host was not found.");
-            screen.InitializeMultiplayerAsHost(hostService, (int)assignment.TeamSize);
-            screen.Lobby.SyncAscensionChange(assignment.Rules.Ascension);
+            mainMenu.SubmenuStack.Push(hostScreen);
         }
         else
         {
@@ -115,9 +133,19 @@ public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyC
             cancellationToken.ThrowIfCancellationRequested();
             if (result.sessionState != RunSessionState.InLobby || !result.joinResponse.HasValue)
                 throw new InvalidOperationException("The assigned Steam lobby is no longer accepting players.");
-            screen.InitializeMultiplayerAsClient(join.NetService, result.joinResponse.Value);
+            if (assignment.Kind == QueueKind.Entertainment)
+            {
+                var custom = mainMenu.SubmenuStack.GetSubmenuType<NCustomRunScreen>();
+                custom.InitializeMultiplayerAsClient(join.NetService, result.joinResponse.Value);
+                mainMenu.SubmenuStack.Push(custom);
+            }
+            else
+            {
+                var standard = mainMenu.SubmenuStack.GetSubmenuType<NCharacterSelectScreen>();
+                standard.InitializeMultiplayerAsClient(join.NetService, result.joinResponse.Value);
+                mainMenu.SubmenuStack.Push(standard);
+            }
         }
-        mainMenu.SubmenuStack.Push(screen);
         Log.Info($"[SpireRace] Joined original Steam cooperative lobby {lobbyId} for race {assignment.MatchId}.");
     }
 
