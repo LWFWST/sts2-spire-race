@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: spire_race
+      POSTGRES_USER: spire_race
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spire_race"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build:
+      context: ../server
+    restart: unless-stopped
+    environment:
+      RACE_ADDRESS: :8080
+      DATABASE_URL: postgres://spire_race:${POSTGRES_PASSWORD}@postgres:5432/spire_race?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      TOKEN_SECRET: ${TOKEN_SECRET:?required}
+      STEAM_APP_ID: 2868840
+      STEAM_WEB_API_KEY: ${STEAM_WEB_API_KEY:?required}
+      ALLOW_DEV_AUTH: "false"
+      OFFICIAL_SERVER: "true"
+      STEAM_ALLOWLIST: ${STEAM_ALLOWLIST:?required}
+      INTEGRITY_DIR: /app/config/integrity
+      MIGRATIONS_DIR: /app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./proxy_params:/etc/nginx/proxy_params:ro
+      - ./tls:/etc/nginx/tls:ro
+    depends_on:
+      - server
+
+volumes:
+  postgres-data:
+  redis-data:

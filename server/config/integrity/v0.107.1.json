@@ -1,0 +1,8 @@
+{
+  "game_version": "v0.107.1",
+  "manifest_version": "development-template-1",
+  "game_files": [],
+  "allowed_mod_files": [],
+  "allowed_mod_ids": ["sts2-spire-race"],
+  "signature": "GENERATE_FOR_DEPLOYMENT"
+}

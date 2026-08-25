@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: spire_race
+      POSTGRES_USER: spire_race
+      POSTGRES_PASSWORD: spire_race
+    ports:
+      - "5432:5432"
+    volumes:
+      - spire-race-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spire_race"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - spire-race-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build:
+      context: ./server
+    environment:
+      RACE_ADDRESS: :8080
+      DATABASE_URL: postgres://spire_race:spire_race@postgres:5432/spire_race?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      TOKEN_SECRET: ${TOKEN_SECRET:-local-development-secret}
+      STEAM_APP_ID: ${STEAM_APP_ID:-2868840}
+      STEAM_WEB_API_KEY: ${STEAM_WEB_API_KEY:-}
+      ALLOW_DEV_AUTH: ${ALLOW_DEV_AUTH:-true}
+      OFFICIAL_SERVER: ${OFFICIAL_SERVER:-false}
+      STEAM_ALLOWLIST: ${STEAM_ALLOWLIST:-}
+      INTEGRITY_DIR: /app/config/integrity
+      MIGRATIONS_DIR: /app/migrations
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/spire-race-server", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  spire-race-postgres:
+  spire-race-redis:

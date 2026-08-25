@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>sts2-spire-race</AssemblyName>
+    <RootNamespace>Sts2SpireRace</RootNamespace>
+    <Version>2.0.0</Version>
+    <GameDir Condition="'$(GameDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2</GameDir>
+    <GameDataDir>$(GameDir)\data_sts2_windows_x86_64</GameDataDir>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <DebugType>portable</DebugType>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2" HintPath="$(GameDataDir)\sts2.dll" Private="false" />
+    <Reference Include="GodotSharp" HintPath="$(GameDataDir)\GodotSharp.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(GameDataDir)\0Harmony.dll" Private="false" />
+    <Reference Include="Steamworks.NET" HintPath="$(GameDataDir)\Steamworks.NET.dll" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="localization\*.json" />
+    <Compile Remove="tests\**\*.cs" />
+  </ItemGroup>
+</Project>
