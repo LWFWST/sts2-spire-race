@@ -27,6 +27,7 @@ services:
       retries: 20
 
   server:
+    image: ${SPIRE_RACE_SERVER_IMAGE:-spire-race-server:production}
     build:
       context: ../server
     restart: unless-stopped

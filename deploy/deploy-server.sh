@@ -4,12 +4,16 @@ set -euo pipefail
 release_dir=""
 root_dir="/opt/sts2-spire-race"
 compose_project="spire-race"
+prebuilt_image=""
+image_tag=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --release-dir) release_dir="$2"; shift 2 ;;
     --root-dir) root_dir="$2"; shift 2 ;;
     --project) compose_project="$2"; shift 2 ;;
+    --prebuilt-image) prebuilt_image="$2"; shift 2 ;;
+    --image-tag) image_tag="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -30,6 +34,14 @@ docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required.
 [[ -f "$env_file" ]] || { echo "Missing $env_file" >&2; exit 1; }
 [[ -f "$tls_dir/spirerace.xyz_bundle.crt" ]] || { echo "Missing TLS certificate." >&2; exit 1; }
 [[ -f "$tls_dir/spirerace.xyz.key" ]] || { echo "Missing TLS private key." >&2; exit 1; }
+if [[ -n "$prebuilt_image" ]]; then
+  [[ -f "$prebuilt_image" ]] || { echo "Missing prebuilt server image: $prebuilt_image" >&2; exit 1; }
+  [[ -n "$image_tag" ]] || { echo "--image-tag is required with --prebuilt-image." >&2; exit 1; }
+  echo "Loading prebuilt server image $image_tag"
+  docker load -i "$prebuilt_image" >/dev/null
+  docker image inspect "$image_tag" >/dev/null
+  export SPIRE_RACE_SERVER_IMAGE="$image_tag"
+fi
 
 mkdir -p "$backup_dir" "$release_dir/deploy/tls"
 install -m 0644 "$tls_dir/spirerace.xyz_bundle.crt" "$release_dir/deploy/tls/spirerace.xyz_bundle.crt"
@@ -48,8 +60,13 @@ for legacy_service in spire-race.service spire-race-server.service; do
   fi
 done
 
-echo "Building and starting Spire Race"
-"${compose[@]}" up -d --build --remove-orphans
+if [[ -n "$prebuilt_image" ]]; then
+  echo "Starting Spire Race from the prebuilt image"
+  "${compose[@]}" up -d --no-build --remove-orphans
+else
+  echo "Building and starting Spire Race"
+  "${compose[@]}" up -d --build --remove-orphans
+fi
 
 for attempt in $(seq 1 30); do
   if "${compose[@]}" exec -T server /app/spire-race-server --healthcheck >/dev/null 2>&1; then

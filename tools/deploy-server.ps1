@@ -4,7 +4,8 @@ param(
     [string]$RemoteRoot = '/opt/sts2-spire-race',
     [string]$SshKeyPath = '',
     [string]$ProductionEnvFile = '',
-    [string]$TlsSource = 'C:\CP\MCC2\spirerace.xyz_nginx'
+    [string]$TlsSource = 'C:\CP\MCC2\spirerace.xyz_nginx',
+    [switch]$BuildImageRemotely
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,6 +13,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $timestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 $archive = Join-Path ([System.IO.Path]::GetTempPath()) "spire-race-$timestamp.tar.gz"
 $remoteArchive = "/tmp/spire-race-$timestamp.tar.gz"
+$imageTag = "spire-race-server:$timestamp"
+$imageArchive = Join-Path ([System.IO.Path]::GetTempPath()) "spire-race-server-$timestamp.tar"
+$remoteImageArchive = "/tmp/spire-race-server-$timestamp.tar"
 $target = "$ServerUser@$ServerHost"
 $sshOptions = @('-o', 'StrictHostKeyChecking=accept-new')
 if ($SshKeyPath) {
@@ -31,6 +35,13 @@ if ($ProductionEnvFile -and -not (Test-Path -LiteralPath $ProductionEnvFile -Pat
 }
 
 try {
+    if (-not $BuildImageRemotely) {
+        & docker build --platform linux/amd64 -t $imageTag (Join-Path $projectRoot 'server')
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to build the production server image.' }
+        & docker save -o $imageArchive $imageTag
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to export the production server image.' }
+    }
+
     & tar -czf $archive --exclude='.git' --exclude='bin' --exclude='obj' --exclude='dist' `
         --exclude='.test-users' --exclude='artifacts' --exclude='*.log' --exclude='.env' `
         --exclude='.env.*' --exclude='*.pem' --exclude='*.key' --exclude='*.crt' `
@@ -42,6 +53,9 @@ try {
     & scp @sshOptions $archive "${target}:$remoteArchive"
     & scp @sshOptions $certificate "${target}:/tmp/spirerace.xyz_bundle.crt"
     & scp @sshOptions $privateKey "${target}:/tmp/spirerace.xyz.key"
+    if (-not $BuildImageRemotely) {
+        & scp @sshOptions $imageArchive "${target}:$remoteImageArchive"
+    }
     if ($ProductionEnvFile) {
         & scp @sshOptions $ProductionEnvFile "${target}:/tmp/spire-race.env.production"
     }
@@ -50,19 +64,23 @@ try {
     $envInstall = if ($ProductionEnvFile) {
         "sudo install -m 0600 /tmp/spire-race.env.production '$RemoteRoot/shared/.env.production' &&"
     } else { '' }
+    $imageDeployArgs = if ($BuildImageRemotely) { '' } else {
+        "--prebuilt-image '$remoteImageArchive' --image-tag '$imageTag'"
+    }
     $remoteCommand = @"
 set -euo pipefail
-trap 'rm -f "$remoteArchive" /tmp/spirerace.xyz_bundle.crt /tmp/spirerace.xyz.key /tmp/spire-race.env.production' EXIT
+trap 'rm -f "$remoteArchive" "$remoteImageArchive" /tmp/spirerace.xyz_bundle.crt /tmp/spirerace.xyz.key /tmp/spire-race.env.production' EXIT
 release='$RemoteRoot/releases/$timestamp'
 mkdir -p "`$release"
 tar -xzf '$remoteArchive' -C "`$release"
 sudo install -m 0644 /tmp/spirerace.xyz_bundle.crt '$RemoteRoot/shared/tls/spirerace.xyz_bundle.crt'
 sudo install -m 0600 /tmp/spirerace.xyz.key '$RemoteRoot/shared/tls/spirerace.xyz.key'
-$envInstall sudo bash "`$release/deploy/deploy-server.sh" --release-dir "`$release" --root-dir '$RemoteRoot'
+$envInstall sudo bash "`$release/deploy/deploy-server.sh" --release-dir "`$release" --root-dir '$RemoteRoot' $imageDeployArgs
 "@
-    & ssh @sshOptions -t $target $remoteCommand
+    & ssh @sshOptions $target $remoteCommand
     if ($LASTEXITCODE -ne 0) { throw 'Remote deployment failed.' }
 }
 finally {
     Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $imageArchive -Force -ErrorAction SilentlyContinue
 }
