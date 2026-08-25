@@ -30,6 +30,15 @@ public sealed class DemoRaceServices : IRaceServices
 
     public IRacePlatformIdentityProvider IdentityProvider { get; }
     public IRaceSessionLauncher SessionLauncher { get; }
+    public bool IsAuthenticated { get; private set; }
+    public async Task AuthenticateAsync(CancellationToken cancellationToken = default)
+    {
+        var identity = await IdentityProvider.GetLocalIdentityAsync(cancellationToken);
+        if (identity.PlatformId == 0 && !Game.RaceRuntimeInfo.DevelopmentAuthentication)
+            throw new InvalidOperationException("A Steam identity is required for Spire Race.");
+        IsAuthenticated = true;
+    }
+    public Task ResumeAsync(CancellationToken cancellationToken = default) => AuthenticateAsync(cancellationToken);
     public Task ChangeServerAsync(Uri serverUri, CancellationToken cancellationToken = default) => Task.CompletedTask;
     public QueueSnapshot CurrentQueue { get; private set; } = new(QueueState.Idle);
     public event Action<QueueSnapshot>? QueueChanged;

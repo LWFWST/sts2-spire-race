@@ -101,6 +101,13 @@ public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyC
         screen.Lobby.SyncAscensionChange(rules.Ascension);
         screen.Lobby.SetSeed(rules.RandomSeed ? null : rules.Seed);
         screen.Lobby.SetModifiers(ResolveModifiers(rules.Modifiers));
+        var identity = await RaceServiceRegistry.Services.IdentityProvider.GetLocalIdentityAsync(cancellationToken);
+        var sessionId = $"p2p-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        var local = new RaceTeam(sessionId + "-local", "Steam P2P",
+            [new RaceParticipant(identity.PlatformId.ToString(), identity.DisplayName, "", true, true)]);
+        var opponent = new RaceTeam(sessionId + "-peer", "P2P peers", []);
+        RaceActiveSession.Begin(new MatchAssignment(sessionId, sessionId, RaceRuntimeInfo.GameVersion, QueueKind.Entertainment,
+            rules.TeamSize, rules, local, opponent, "", sessionId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
         mainMenu.SubmenuStack.Push(screen);
         Log.Info("[SpireRace] Opened a direct Steam P2P entertainment lobby without race-server match coordination.");
     }
@@ -116,7 +123,7 @@ public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyC
         if (!ulong.TryParse(lobbyText, out var lobbyId) || lobbyId == 0)
             throw new InvalidOperationException("The race server did not provide this team's Steam lobby.");
 
-        if (assignment.Kind != QueueKind.Entertainment)
+        if (assignment.Kind != QueueKind.Entertainment || assignment.Rules.CoordinationMode == "server")
             RaceActiveSession.Begin(assignment);
         game.DebugSeedOverride = assignment.Rules.Seed;
         var isHost = localPlayer.Id == assignment.FirstSteamHostPlayerId || localPlayer.Id == assignment.SecondSteamHostPlayerId;

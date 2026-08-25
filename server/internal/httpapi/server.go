@@ -530,7 +530,9 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &rules) {
 		return
 	}
-	if rules.TeamSize < 1 || rules.TeamSize > 4 || rules.Ascension < 0 || rules.Ascension > 10 || rules.EventSLLimit < 0 || rules.EventSLLimit > 9 || rules.CombatSLLimit < 0 || rules.CombatSLLimit > 9 {
+	if rules.TeamSize < 1 || rules.TeamSize > 4 || rules.Ascension < 0 || rules.Ascension > 10 ||
+		rules.TimeLimitMS <= 0 || rules.TimeLimitMS > domain.MaxMatchMilliseconds ||
+		rules.EventSLLimit < 0 || rules.EventSLLimit > 9 || rules.CombatSLLimit < 0 || rules.CombatSLLimit > 9 {
 		writeError(w, 400, "invalid entertainment rules")
 		return
 	}
@@ -642,6 +644,31 @@ func (s *Server) startRoom(w http.ResponseWriter, r *http.Request) {
 			hosts[member.Team] = member.PlayerID
 		}
 	}
+	firstPlayers, secondPlayers := []string{}, []string{}
+	characters := map[string]string{}
+	for _, member := range room.Members {
+		characters[member.PlayerID] = member.CharacterID
+		if member.Team == 1 {
+			firstPlayers = append(firstPlayers, member.PlayerID)
+		} else {
+			secondPlayers = append(secondPlayers, member.PlayerID)
+		}
+	}
+	matchID := "fun-" + room.Code
+	assignment := domain.Assignment{
+		MatchID: matchID, GameID: matchID, GameVersion: r.Header.Get("X-Spire-Race-Game-Version"), Kind: domain.QueueEntertainment,
+		TeamSize: room.Rules.TeamSize, FirstTeamID: "room-" + room.Code + "-1", SecondTeamID: "room-" + room.Code + "-2",
+		FirstPlayerIDs: firstPlayers, SecondPlayerIDs: secondPlayers, Rules: room.Rules, SessionNonce: room.Code,
+		StartedAtMS: time.Now().UnixMilli(), CharacterIDs: characters,
+		FirstSteamHostPlayerID: hosts[1], SecondSteamHostPlayerID: hosts[2],
+	}
+	if assignment.GameVersion == "" {
+		assignment.GameVersion = "unknown"
+	}
+	if err := s.Matches.CreateEntertainment(r.Context(), assignment); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if room.Rules.TeamSize == 1 {
 		ids := make([]string, 0, len(room.Members))
 		for _, member := range room.Members {
@@ -649,7 +676,7 @@ func (s *Server) startRoom(w http.ResponseWriter, r *http.Request) {
 		}
 		s.Hub.Broadcast(ids, "entertainment_match_started", map[string]any{
 			"room": room, "first_steam_host_player_id": hosts[1], "second_steam_host_player_id": hosts[2],
-			"first_steam_lobby_id": "", "second_steam_lobby_id": "",
+			"first_steam_lobby_id": "", "second_steam_lobby_id": "", "started_at_ms": assignment.StartedAtMS,
 		})
 		writeJSON(w, http.StatusOK, room)
 		return
@@ -700,6 +727,7 @@ func (s *Server) registerEntertainmentLobby(ctx context.Context, playerID, code,
 	s.Hub.Broadcast(ids, "entertainment_match_started", map[string]any{
 		"room": room, "first_steam_host_player_id": hosts[1], "second_steam_host_player_id": hosts[2],
 		"first_steam_lobby_id": first, "second_steam_lobby_id": second,
+		"started_at_ms": room.StartedAt.UnixMilli(),
 	})
 	return nil
 }

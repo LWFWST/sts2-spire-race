@@ -19,10 +19,14 @@ func main() {
 	gameDir := flag.String("game-dir", "", "Slay the Spire 2 installation directory")
 	modDLL := flag.String("mod-dll", "", "packaged sts2-spire-race.dll")
 	modManifest := flag.String("mod-manifest", "", "packaged manifest.json")
-	secret := flag.String("secret", "", "deployment manifest signing secret")
+	secret := flag.String("secret", "", "deployment manifest signing secret (prefer TOKEN_SECRET environment variable)")
 	output := flag.String("output", "", "manifest output path")
 	flag.Parse()
-	if *version == "" || *gameDir == "" || *modDLL == "" || *modManifest == "" || *secret == "" || *output == "" {
+	signingSecret := *secret
+	if signingSecret == "" {
+		signingSecret = os.Getenv("TOKEN_SECRET")
+	}
+	if *version == "" || *gameDir == "" || *modDLL == "" || *modManifest == "" || signingSecret == "" || *output == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -42,7 +46,7 @@ func main() {
 		}
 		m.AllowedModFiles = append(m.AllowedModFiles, file)
 	}
-	signature, err := integrity.Sign(m, []byte(*secret))
+	signature, err := integrity.Sign(m, []byte(signingSecret))
 	if err != nil {
 		fatal(err)
 	}

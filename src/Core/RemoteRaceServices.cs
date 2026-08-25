@@ -47,7 +47,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         IdentityProvider = identityProvider;
         SessionLauncher = sessionLauncher ?? new NoOpSessionLauncher();
         _secondary = new DemoRaceServices(identityProvider, SessionLauncher);
-        _http = new HttpClient { BaseAddress = serverUri ?? RaceRuntimeInfo.ServerUri, Timeout = TimeSpan.FromSeconds(15) };
+        _http = CreateHttpClient(serverUri ?? RaceRuntimeInfo.ServerUri);
     }
 
     public IRacePlatformIdentityProvider IdentityProvider { get; }
@@ -117,7 +117,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         }
         _token = string.Empty;
         _refreshToken = string.Empty;
-        _http = new HttpClient { BaseAddress = normalized, Timeout = TimeSpan.FromSeconds(15) };
+        _http = CreateHttpClient(normalized);
         _queueRequest = null;
         _localTeam = null;
         _opponentTeam = null;
@@ -132,20 +132,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         RoomChanged?.Invoke(null);
         PartyChanged?.Invoke(null);
         QueueChanged?.Invoke(CurrentQueue);
-        try
-        {
-            await EnsureOnlineReadyAsync(cancellationToken, verifyIntegrity: false);
-            previousHttp.Dispose();
-        }
-        catch
-        {
-            _http.Dispose();
-            _http = previousHttp;
-            _token = string.Empty;
-            _refreshToken = string.Empty;
-            await EnsureOnlineReadyAsync(cancellationToken, verifyIntegrity: false);
-            throw;
-        }
+        previousHttp.Dispose();
+        await EnsureOnlineReadyAsync(cancellationToken, verifyIntegrity: false);
     }
 
     private async Task<bool> TryResumeSessionAsync(string playerId, CancellationToken cancellationToken)
@@ -601,8 +589,14 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                         var entertainmentLaunch = data.Deserialize<EntertainmentLaunchDto>(Json)!;
                         var launchRoom = ApplyRoom(entertainmentLaunch.Room);
                         CurrentMatch = BuildEntertainmentAssignment(launchRoom, entertainmentLaunch.FirstSteamHostPlayerId,
-                            entertainmentLaunch.FirstSteamLobbyId, entertainmentLaunch.SecondSteamLobbyId, entertainmentLaunch.SecondSteamHostPlayerId);
+                            entertainmentLaunch.FirstSteamLobbyId, entertainmentLaunch.SecondSteamLobbyId, entertainmentLaunch.SecondSteamHostPlayerId,
+                            entertainmentLaunch.StartedAtMs);
+                        _localTeam = CurrentMatch.LocalTeam;
+                        _opponentTeam = CurrentMatch.OpponentTeam;
+                        _queueRequest = new QueueRequest(QueueKind.Entertainment, CurrentMatch.TeamSize, null, CurrentMatch.Rules);
+                        CurrentSettlement = null;
                         MatchChanged?.Invoke(CurrentMatch);
+                        SetQueue(new QueueSnapshot(QueueState.Starting, _queueRequest, _localTeam, _opponentTeam, Detail: "starting"));
                         await SessionLauncher.LaunchAsync(CurrentMatch, cancellationToken);
                         break;
                     case "entertainment_room_closed":
@@ -730,6 +724,13 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         return await ReadAsync<T>(response, cancellationToken);
     }
 
+    private static HttpClient CreateHttpClient(Uri baseAddress)
+    {
+        var client = new HttpClient { BaseAddress = baseAddress, Timeout = TimeSpan.FromSeconds(15) };
+        client.DefaultRequestHeaders.Add("X-Spire-Race-Game-Version", RaceRuntimeInfo.GameVersion);
+        return client;
+    }
+
     private async Task<T> PostAsync<T>(string path, object payload, bool authenticated, CancellationToken cancellationToken)
     {
         if (authenticated) await AuthenticateAsync(cancellationToken);
@@ -813,7 +814,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         PartyChanged?.Invoke(party);
         return party;
     }
-    private MatchAssignment BuildEntertainmentAssignment(EntertainmentRoom room, string firstHost, string firstLobby, string secondLobby, string secondHost = "")
+    private MatchAssignment BuildEntertainmentAssignment(EntertainmentRoom room, string firstHost, string firstLobby, string secondLobby,
+        string secondHost = "", long startedAtMs = 0)
     {
         var identityId = (_identity?.PlatformId ?? 0).ToString();
         var firstMembers = room.Members.Where(x => x.Team == 1).ToArray();
@@ -828,7 +830,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         return new MatchAssignment("fun-" + room.Code, "fun-" + room.Code, RaceRuntimeInfo.GameVersion, QueueKind.Entertainment,
             room.Rules.TeamSize, room.Rules, localFirst ? firstTeam : secondTeam, localFirst ? secondTeam : firstTeam,
             room.Rules.TeamSize == TeamSize.One ? firstMembers.First().CharacterId : "", room.Code,
-            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), null, characterIds, firstHost, secondHost, firstLobby, secondLobby);
+            startedAtMs > 0 ? startedAtMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), null, characterIds, firstHost, secondHost, firstLobby, secondLobby);
     }
     private static SettlementSide MapSide(SettlementSideDto x, string name) => new(x.TeamId, name, ParseOutcome(x.Outcome), x.HighestFloor,
         x.HighestFloorEnteredMs, x.CompletionMs, x.RestartCount, x.EventSlUsed, x.CombatSlUsed);
@@ -887,7 +889,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     private sealed record RoomMemberDto(string PlayerId, string DisplayName, int Team, bool IsHost, bool IsReady = false, string CharacterId = "Ironclad");
     private sealed record EntertainmentLobbyRequiredDto(RoomDto Room, int Team, string HostPlayerId);
     private sealed record EntertainmentLaunchDto(RoomDto Room, string FirstSteamHostPlayerId, string SecondSteamHostPlayerId,
-        string FirstSteamLobbyId, string SecondSteamLobbyId);
+        string FirstSteamLobbyId, string SecondSteamLobbyId, long StartedAtMs = 0);
     private sealed record ProfileDto(string Id, string DisplayName, RatingDto Solo, RatingDto Team, string FavoriteCharacter = "Ironclad", long BestTimeMs = 0, double WinRate = 0, HistoryDto[]? RecentMatches = null);
     private sealed record RatingDto(string Tier, int Points, int Games, int HiddenRating, int Wins = 0, int Losses = 0, int Division = 4, int LeaderboardRank = 0);
     private sealed record HistoryDto(string MatchId, string Kind, int TeamSize, bool Victory, long RunTimeMs, string Character, DateTimeOffset PlayedAt, int RatingDelta);

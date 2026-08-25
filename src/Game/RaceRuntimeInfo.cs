@@ -43,6 +43,9 @@ public static class RaceRuntimeInfo
         }
     }
 
+    public static bool IsOfficialServer(Uri? uri = null) =>
+        string.Equals((uri ?? ServerUri).Host, new Uri(OfficialServerUrl).Host, StringComparison.OrdinalIgnoreCase);
+
     public static string LoadServerUrl()
     {
         try

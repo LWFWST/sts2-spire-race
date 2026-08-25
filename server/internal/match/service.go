@@ -102,6 +102,32 @@ func (s *Service) Create(ctx context.Context, first, second domain.QueueRequest)
 	return a, nil
 }
 
+func (s *Service) CreateEntertainment(ctx context.Context, a domain.Assignment) error {
+	if a.Kind != domain.QueueEntertainment || len(a.FirstPlayerIDs) == 0 || len(a.SecondPlayerIDs) == 0 {
+		return errors.New("invalid entertainment assignment")
+	}
+	if a.StartedAtMS == 0 {
+		a.StartedAtMS = time.Now().UnixMilli()
+	}
+	if err := s.repo.SaveMatch(ctx, a); err != nil {
+		return err
+	}
+	if err := s.repo.StartMatch(ctx, a.MatchID, time.UnixMilli(a.StartedAtMS)); err != nil {
+		return err
+	}
+	st := &state{Assignment: a, Confirmed: map[string]bool{}, Ready: map[string]bool{}, Progress: map[string]domain.Progress{},
+		Idempotency: map[string]bool{}, SurrenderVotes: map[string]map[string]bool{}, PendingSL: map[string]bool{},
+		ForcedReasons: map[string]domain.FinishReason{}, Bans: map[string][2]string{}, SteamLobbyIDs: map[string]string{}}
+	s.mu.Lock()
+	s.matches[a.MatchID] = st
+	for _, playerID := range allPlayers(a) {
+		s.playerMatch[playerID] = a.MatchID
+	}
+	s.mu.Unlock()
+	time.AfterFunc(time.Duration(a.Rules.TimeLimitMS)*time.Millisecond, func() { s.timeout(a.MatchID, a.GameID) })
+	return nil
+}
+
 func (s *Service) Confirm(ctx context.Context, playerID string, accepted bool) error {
 	s.mu.Lock()
 	st, teamID, err := s.stateForPlayer(playerID)
@@ -588,9 +614,13 @@ func (s *Service) trySettle(ctx context.Context, matchID string) error {
 	assignment := st.Assignment
 	notifier := s.notifier
 	s.mu.Unlock()
-	deltas, err := s.repo.ApplyRatings(ctx, assignment, settlement.WinnerTeamID)
-	if err != nil {
-		return err
+	deltas := map[string]int{}
+	if assignment.Kind != domain.QueueEntertainment {
+		var err error
+		deltas, err = s.repo.ApplyRatings(ctx, assignment, settlement.WinnerTeamID)
+		if err != nil {
+			return err
+		}
 	}
 	settlement.VisibleRatingDeltas = deltas
 	if err := s.repo.SaveSettlement(ctx, settlement); err != nil {

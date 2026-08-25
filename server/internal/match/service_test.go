@@ -13,6 +13,7 @@ type fakeRepository struct {
 	mu          sync.Mutex
 	starts      []domain.Assignment
 	settlements []domain.Settlement
+	ratingCalls int
 }
 
 func (f *fakeRepository) SaveMatch(_ context.Context, a domain.Assignment) error { return nil }
@@ -26,6 +27,9 @@ func (f *fakeRepository) SaveSettlement(_ context.Context, s domain.Settlement) 
 	return nil
 }
 func (f *fakeRepository) ApplyRatings(_ context.Context, _ domain.Assignment, _ string) (map[string]int, error) {
+	f.mu.Lock()
+	f.ratingCalls++
+	f.mu.Unlock()
 	return map[string]int{}, nil
 }
 
@@ -114,6 +118,38 @@ func TestSingleBossFinishWaitsForOpponent(t *testing.T) {
 	}
 	if !foundPending {
 		t.Fatal("finishing team did not receive finish_pending")
+	}
+}
+
+func TestEntertainmentSettlementSkipsRatings(t *testing.T) {
+	repo, notify := &fakeRepository{}, &fakeNotifier{}
+	service := New(repo, notify)
+	assignment := domain.Assignment{
+		MatchID: "fun-ABC123", GameID: "fun-ABC123", GameVersion: "v0.111.0", Kind: domain.QueueEntertainment,
+		TeamSize: 1, FirstTeamID: "room-ABC123-1", SecondTeamID: "room-ABC123-2",
+		FirstPlayerIDs: []string{"a"}, SecondPlayerIDs: []string{"b"}, StartedAtMS: time.Now().UnixMilli(),
+		Rules: domain.Rules{TeamSize: 1, Seed: "shared", Ascension: 3, TimeLimitMS: domain.MaxMatchMilliseconds,
+			EventSLLimit: 3, CombatSLLimit: 3, CharacterID: "Ironclad"},
+	}
+	if err := service.CreateEntertainment(context.Background(), assignment); err != nil {
+		t.Fatal(err)
+	}
+	loser := domain.Progress{MatchID: assignment.MatchID, GameID: assignment.GameID, TeamID: assignment.SecondTeamID,
+		Sequence: 1, Floor: 43, FloorEnteredAtMS: 50_000, Outcome: domain.OutcomeScoreLocked}
+	if err := service.Progress(context.Background(), "b", "fun-b", loser); err != nil {
+		t.Fatal(err)
+	}
+	completed := int64(60_123)
+	winner := domain.Progress{MatchID: assignment.MatchID, GameID: assignment.GameID, TeamID: assignment.FirstTeamID,
+		Sequence: 1, Floor: 51, FloorEnteredAtMS: 58_000, FinalBossDefeated: true, CompletedAtMS: &completed, Outcome: domain.OutcomeFinished}
+	if err := service.Progress(context.Background(), "a", "fun-a", winner); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.settlements) != 1 || repo.settlements[0].WinnerTeamID != assignment.FirstTeamID {
+		t.Fatalf("entertainment settlement mismatch: %+v", repo.settlements)
+	}
+	if repo.ratingCalls != 0 {
+		t.Fatalf("entertainment settlement updated ratings %d times", repo.ratingCalls)
 	}
 }
 

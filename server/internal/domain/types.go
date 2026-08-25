@@ -12,8 +12,9 @@ const (
 type QueueKind string
 
 const (
-	QueueCasual QueueKind = "casual"
-	QueueRanked QueueKind = "ranked"
+	QueueCasual        QueueKind = "casual"
+	QueueRanked        QueueKind = "ranked"
+	QueueEntertainment QueueKind = "entertainment"
 )
 
 type Outcome string

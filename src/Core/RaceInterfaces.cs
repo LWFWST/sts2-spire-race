@@ -133,6 +133,7 @@ public interface IRacePlatformIdentityProvider
 }
 
 public interface IRaceServices :
+    IRaceAuthService,
     IRaceMatchmakingService,
     IRaceProfileService,
     IRaceSocialService,

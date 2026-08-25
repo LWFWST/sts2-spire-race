@@ -21,7 +21,9 @@ Solo assignments launch a real server-seeded run. Team assignments elect one Ste
 
 Run `tools/package.ps1`, then copy `dist/package/sts2-spire-race` into the game's `mods` directory. The same command creates `dist/server`.
 
-For local backend development, run `docker compose up --build`. Production uses `deploy/docker-compose.prod.yml`, requires `TOKEN_SECRET`, `STEAM_WEB_API_KEY`, `POSTGRES_PASSWORD`, and `STEAM_ALLOWLIST`, and terminates TLS in Nginx. Generate exact integrity manifests with `go run ./cmd/integrity-manifest` from the `server` directory.
+For local backend development, run `docker compose up --build`. Production uses `deploy/docker-compose.prod.yml`, requires `TOKEN_SECRET`, `STEAM_WEB_API_KEY`, `POSTGRES_PASSWORD`, and `STEAM_ALLOWLIST`, and terminates TLS in Nginx. Generate exact integrity manifests with `go run ./cmd/integrity-manifest` from the `server` directory; provide the signing key through the `TOKEN_SECRET` environment variable so it is not exposed in process arguments.
+
+For a production upload from Windows, prepare the shared production environment file and run `tools/deploy-server.ps1`. The wrapper uploads a versioned source archive and TLS files, then invokes `deploy/deploy-server.sh` on Ubuntu. The server script backs up a running PostgreSQL database, disables legacy systemd race services, starts the fixed `spire-race` Compose project, and changes the `current` symlink only after the health check passes. Password authentication is prompted interactively and is never stored by the script.
 
 Official access requires a valid Steam session ticket and an allowlisted SteamID. Self-hosted instances can disable official mode. Credentials, Steam tickets, TLS keys, integrity secrets, and game files are intentionally excluded from this repository.
 

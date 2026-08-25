@@ -19,7 +19,9 @@ $checks = @(
     @{ File = "src\Core\Multiplayer\Game\JoinFlow.cs"; Pattern = "Task<JoinResult> Begin\("; Name = "JoinFlow.Begin" },
     @{ File = "src\Core\Nodes\Screens\CharacterSelect\NCharacterSelectScreen.cs"; Pattern = "InitializeMultiplayerAsHost\("; Name = "NCharacterSelectScreen.InitializeMultiplayerAsHost" },
     @{ File = "src\Core\Nodes\Screens\CharacterSelect\NCharacterSelectScreen.cs"; Pattern = "InitializeMultiplayerAsClient\("; Name = "NCharacterSelectScreen.InitializeMultiplayerAsClient" },
-    @{ File = "src\Core\Nodes\Screens\CustomRun\NCustomRunScreen.cs"; Pattern = "InitializeMultiplayerAsHost\("; Name = "NCustomRunScreen.InitializeMultiplayerAsHost" }
+    @{ File = "src\Core\Nodes\Screens\CustomRun\NCustomRunScreen.cs"; Pattern = "InitializeMultiplayerAsHost\("; Name = "NCustomRunScreen.InitializeMultiplayerAsHost" },
+    @{ File = "src\Core\Nodes\Debug\NDevConsole.cs"; Pattern = "public override void _Input\(InputEvent inputEvent\)"; Name = "NDevConsole._Input" },
+    @{ File = "src\Core\Nodes\Debug\NDevConsole.cs"; Pattern = "public void HideConsole\(\)"; Name = "NDevConsole.HideConsole" }
 )
 
 $assets = @(

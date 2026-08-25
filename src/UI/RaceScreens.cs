@@ -734,6 +734,7 @@ public static class RaceScreens
     {
         try
         {
+            await page.Controller.Services.AuthenticateAsync();
             RaceRules.Validate(page.Controller.EntertainmentRules);
             if (page.Controller.EntertainmentRules.CoordinationMode == "p2p")
             {
@@ -1402,18 +1403,22 @@ public static class RaceScreens
                 return;
             }
             addressInput.Text = serverUri.AbsoluteUri.TrimEnd('/');
+            RaceRuntimeInfo.SaveServerUrl(serverUri.AbsoluteUri);
             page.Status.SetTextAutoSize(RaceTextCatalog.Get("settings.connecting"));
             try
             {
                 await page.Controller.Services.ChangeServerAsync(serverUri);
-                RaceRuntimeInfo.SaveServerUrl(serverUri.AbsoluteUri);
                 if (IsAlive(page))
                     page.Status.SetTextAutoSize(RaceTextCatalog.Get("settings.saved"));
+                if (RaceRuntimeInfo.IsOfficialServer(serverUri))
+                    page.Controller.OpenDetails(RaceTextCatalog.Get("auth.notice_title"), RaceTextCatalog.Get("auth.beta_access_required"));
             }
             catch (Exception exception)
             {
                 if (IsAlive(page))
                     page.Status.SetTextAutoSize(RaceTextCatalog.Format("settings.failed", exception.Message));
+                if (RaceRuntimeInfo.IsOfficialServer(serverUri))
+                    page.Controller.ShowServerNotice(exception, serverUri);
             }
         }
     }

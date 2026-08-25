@@ -258,4 +258,6 @@
   "status.demo": "开发演示模式——战绩不会上传。",
   "status.online": "已连接竞速服务器；正式比赛由服务器裁定。"
   ,"auth.beta_access_required": "现在处于内测阶段，可能会有 bug，且服务器吞吐量较低，因此仅对部分玩家开放。你可以联系 spirerace@163.com 免费申请内测。\n\n你也可以通过爱发电 https://ifdian.net/a/spirerace 或 Ko-fi https://ko-fi.com/spirerace 捐赠，以支持服务器。\n\n项目已经开源，你可以进行二次开发，也可以自行部署服务器。"
+  ,"auth.notice_title": "尖塔竞速服务器提示"
+  ,"auth.steam_login_failed": "Steam 登录失败：{0}"
 }

@@ -10,6 +10,7 @@ namespace Sts2SpireRace.UI;
 public sealed partial class RaceUiController : Node
 {
     private static bool _startupNavigationConsumed;
+    private static bool _startupAuthenticationAttempted;
     private static string? _lastAutoOpenedSettlementKey;
     private NMainMenu _mainMenu = null!;
     private MegaCrit.Sts2.addons.mega_text.MegaLabel? _mainMenuLabel;
@@ -38,8 +39,11 @@ public sealed partial class RaceUiController : Node
                 : RaceTextCatalog.Format("invite.room_body", invite.DisplayName, invite.RoomCode),
             () => AcceptInviteAsync(invite))).CallDeferred();
         Services.InviteReceived += _inviteCallback;
-        if (Services is RemoteRaceServices remote)
-            _ = remote.WarmupAsync();
+        if (!_startupAuthenticationAttempted)
+        {
+            _startupAuthenticationAttempted = true;
+            _ = AuthenticateAtStartupAsync();
+        }
         var performStartupNavigation = !_startupNavigationConsumed;
         _startupNavigationConsumed = true;
         if (performStartupNavigation && Services.CurrentQueue.State is QueueState.Draft)
@@ -106,6 +110,9 @@ public sealed partial class RaceUiController : Node
     }
 
     public void OpenModeSelection(QueueKind kind, bool teamOnly = false) =>
+        _ = OpenAuthenticatedAsync(() => OpenModeSelectionPage(kind, teamOnly));
+
+    private void OpenModeSelectionPage(QueueKind kind, bool teamOnly) =>
         Open(RaceTextCatalog.Get(kind == QueueKind.Ranked ? "mode.title.ranked" : "mode.title.casual"),
             page => RaceScreens.BuildModeSelection(page, kind, teamOnly));
 
@@ -113,8 +120,8 @@ public sealed partial class RaceUiController : Node
         Open(RaceTextCatalog.Get("lobby.title"), page => RaceScreens.BuildLobby(page, kind, size, rules ?? RaceRules.CompetitiveDefault(size)));
 
     public void OpenQueue() => Open(RaceTextCatalog.Get("queue.title"), RaceScreens.BuildQueue);
-    public void OpenRanked() => Open(RaceTextCatalog.Get("rank.title"), RaceScreens.BuildRanked);
-    public void OpenEntertainment() => Open(RaceTextCatalog.Get("fun.title"), RaceScreens.BuildEntertainment);
+    public void OpenRanked() => _ = OpenAuthenticatedAsync(() => Open(RaceTextCatalog.Get("rank.title"), RaceScreens.BuildRanked));
+    public void OpenEntertainment() => _ = OpenAuthenticatedAsync(() => Open(RaceTextCatalog.Get("fun.title"), RaceScreens.BuildEntertainment));
     public void OpenProfile(string? playerId = null) => Open(RaceTextCatalog.Get("profile.title"), page => RaceScreens.BuildProfile(page, playerId));
     public void OpenFriends() => Open(RaceTextCatalog.Get("friends.title"), RaceScreens.BuildFriends);
     public void OpenLeaderboard() => Open(RaceTextCatalog.Get("leaderboard.title"), RaceScreens.BuildLeaderboard);
@@ -128,6 +135,43 @@ public sealed partial class RaceUiController : Node
     public void OpenConfirm(string title, string body, Func<Task> confirmed) =>
         Open(title, page => RaceScreens.BuildConfirm(page, body, confirmed));
     public void CloseTop() => _mainMenu.SubmenuStack.Pop();
+
+    public void ShowServerNotice(Exception exception, Uri? serverUri = null)
+    {
+        var uri = serverUri ?? RaceRuntimeInfo.ServerUri;
+        var betaNotice = RaceTextCatalog.Get("auth.beta_access_required");
+        var body = RaceRuntimeInfo.IsOfficialServer(uri) && exception.Message == betaNotice
+            ? betaNotice
+            : RaceTextCatalog.Format("auth.steam_login_failed", exception.Message);
+        OpenDetails(RaceTextCatalog.Get("auth.notice_title"), body);
+    }
+
+    private async Task AuthenticateAtStartupAsync()
+    {
+        try
+        {
+            await Services.AuthenticateAsync();
+            if (Services is RemoteRaceServices remote)
+                await remote.WarmupAsync();
+        }
+        catch (Exception exception)
+        {
+            Callable.From(() => ShowServerNotice(exception)).CallDeferred();
+        }
+    }
+
+    private async Task OpenAuthenticatedAsync(Action open)
+    {
+        try
+        {
+            await Services.AuthenticateAsync();
+            Callable.From(open).CallDeferred();
+        }
+        catch (Exception exception)
+        {
+            Callable.From(() => ShowServerNotice(exception)).CallDeferred();
+        }
+    }
 
     private void RefreshMainMenuLabel()
     {

@@ -258,4 +258,6 @@
   "status.demo": "Development demo mode — results are not uploaded.",
   "status.online": "Connected to the race server; official results are server-adjudicated."
   ,"auth.beta_access_required": "Spire Race is currently in closed beta. Bugs are expected and server capacity is limited, so access is available to selected players. Email spirerace@163.com to request free beta access.\n\nYou can support server costs at Afdian https://ifdian.net/a/spirerace or Ko-fi https://ko-fi.com/spirerace.\n\nThe project is open source: you may modify it or deploy your own server."
+  ,"auth.notice_title": "Spire Race Server Notice"
+  ,"auth.steam_login_failed": "Steam sign-in failed: {0}"
 }

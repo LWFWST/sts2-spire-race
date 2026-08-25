@@ -5,6 +5,7 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Debug;
 using MegaCrit.Sts2.Core.Runs;
 using Sts2SpireRace.Core;
 using Sts2SpireRace.UI;
@@ -23,6 +24,7 @@ internal static class RaceRunReadyPatch
             Log.Info("[SpireRace] NRun ready without an active race session; HUD not attached.");
             return;
         }
+        try { NDevConsole.Instance.HideConsole(); } catch (InvalidOperationException) { }
         var field = AccessTools.Field(typeof(NRun), "_state");
         if (field?.GetValue(__instance) is not RunState state)
         {
@@ -48,6 +50,7 @@ public sealed partial class RaceRunIntegration : Node
     private bool _finishedReported;
     private bool _initialized;
     private RaceRunHud? _hud;
+    private bool IsLocalEntertainment => _match.Kind == QueueKind.Entertainment && _match.Rules.CoordinationMode == "p2p";
 
     public void Configure(RunState state, MatchAssignment match)
     {
@@ -103,6 +106,11 @@ public sealed partial class RaceRunIntegration : Node
         {
             _finishedReported = true;
             var elapsed = ElapsedMilliseconds();
+            if (IsLocalEntertainment)
+            {
+                ShowLocalEntertainmentSettlement(true, elapsed);
+                return;
+            }
             _ = ReportAsync(_checkpoint with
             {
                 Sequence = RaceTelemetrySequence.Next(_checkpoint.GameId),
@@ -115,6 +123,12 @@ public sealed partial class RaceRunIntegration : Node
         if (_state.IsGameOver && !_deathShown)
         {
             _deathShown = true;
+            if (IsLocalEntertainment)
+            {
+                _finishedReported = true;
+                ShowLocalEntertainmentSettlement(false, ElapsedMilliseconds());
+                return;
+            }
             var overlay = new RaceDeathChoiceOverlay { Name = "SpireRaceDeathChoice", ZIndex = 1000 };
             overlay.Configure(this, RaceRules.DeathDecisionSeconds);
             NRun.Instance!.GlobalUi.AddChild(overlay);
@@ -124,8 +138,6 @@ public sealed partial class RaceRunIntegration : Node
 
     private void OnMatchSettled(SettlementSnapshot settlement)
     {
-        if (_finishedReported)
-            return;
         Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement)).CallDeferred();
     }
 
@@ -179,15 +191,50 @@ public sealed partial class RaceRunIntegration : Node
     private async Task ReportAsync(ProgressCheckpoint checkpoint)
     {
         _checkpoint = checkpoint;
+        if (IsLocalEntertainment)
+            return;
         await _matches.ReportProgressAsync(checkpoint, $"{checkpoint.GameId}:{checkpoint.Sequence}");
+    }
+
+    private void ShowLocalEntertainmentSettlement(bool completed, long elapsed)
+    {
+        if (_checkpoint is null)
+            return;
+        var local = new SettlementSide(_match.LocalTeam.Id, _match.LocalTeam.Name,
+            completed ? ParticipantOutcome.Finished : ParticipantOutcome.ScoreLocked,
+            _checkpoint.Floor, _checkpoint.FloorEnteredAtMilliseconds, completed ? elapsed : null,
+            _checkpoint.RestartCount, _checkpoint.EventSlUsed, _checkpoint.CombatSlUsed);
+        var opponent = new SettlementSide(_match.OpponentTeam.Id, _match.OpponentTeam.Name,
+            ParticipantOutcome.ScoreLocked, 0, 0, null, 0, 0, 0);
+        var settlement = new SettlementSnapshot(_match.MatchId, _match.GameId,
+            completed ? _match.LocalTeam.Id : _match.OpponentTeam.Id,
+            completed ? FinishReason.BossCompletion : FinishReason.HighestFloor,
+            local, opponent, 0, [], "local-p2p-entertainment", DateTimeOffset.UtcNow);
+        Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement, _match)).CallDeferred();
     }
 
     private long ElapsedMilliseconds()
     {
+        if (IsLocalEntertainment)
+            return RunManager.Instance.RunTime * 1000;
         if (_clock?.CurrentClock is { IsSynchronized: true } snapshot)
             return Math.Max(0, snapshot.ElapsedMilliseconds +
                 (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - snapshot.ServerUnixMilliseconds));
         return RunManager.Instance.RunTime * 1000;
+    }
+}
+
+[HarmonyPatch(typeof(NDevConsole), nameof(NDevConsole._Input))]
+internal static class RaceDevConsoleInputPatch
+{
+    [HarmonyPrefix]
+    private static bool Prefix(NDevConsole __instance)
+    {
+        if (RaceActiveSession.Current is null)
+            return true;
+        if (__instance.Visible)
+            __instance.HideConsole();
+        return false;
     }
 }
 
@@ -339,21 +386,24 @@ public sealed partial class RaceSettlementOverlay : Control
     private SettlementSnapshot _settlement = null!;
     private bool _built;
 
-    public static void Show(IRaceMatchService matches, SettlementSnapshot settlement)
+    public static void Show(IRaceMatchService matches, SettlementSnapshot settlement, MatchAssignment? match = null)
     {
         var globalUi = NRun.Instance?.GlobalUi;
         if (globalUi is null || globalUi.GetNodeOrNull<Node>("SpireRaceSettlement") is not null)
             return;
         var overlay = new RaceSettlementOverlay { Name = "SpireRaceSettlement", ZIndex = 1000 };
-        overlay.Configure(matches, settlement);
+        overlay.Configure(matches, settlement, match);
         globalUi.AddChild(overlay);
         overlay.Build();
     }
 
-    public void Configure(IRaceMatchService matches, SettlementSnapshot settlement)
+    private MatchAssignment? _match;
+
+    public void Configure(IRaceMatchService matches, SettlementSnapshot settlement, MatchAssignment? match = null)
     {
         _matches = matches;
         _settlement = settlement;
+        _match = match;
     }
 
     public override void _Ready() => Build();
@@ -368,12 +418,12 @@ public sealed partial class RaceSettlementOverlay : Control
         var shade = new ColorRect { Color = new Color(0, 0, 0, 0.75f), MouseFilter = MouseFilterEnum.Stop };
         shade.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
         AddChild(shade);
-        var teamMatch = _matches.CurrentMatch;
+        var teamMatch = _match ?? _matches.CurrentMatch;
         var victory = teamMatch is not null && _settlement.WinnerTeamId == teamMatch.LocalTeam.Id;
         var panel = RaceUiAssets.Panel(new Color("223c43"), 18);
         panel.SetAnchorsPreset(LayoutPreset.Center);
-        panel.Position = new Vector2(-360, -165);
-        panel.Size = new Vector2(720, 330);
+        panel.Position = new Vector2(-380, -220);
+        panel.Size = new Vector2(760, 440);
         AddChild(panel);
         var content = new VBoxContainer();
         content.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect, LayoutPresetMode.KeepSize, 30);
@@ -385,6 +435,12 @@ public sealed partial class RaceSettlementOverlay : Control
         content.AddChild(RaceUiAssets.Label(
             $"{RaceTextCatalog.Get("result.reason")}：{SettlementReason(_settlement.Reason)}",
             21, StsColors.cream, HorizontalAlignment.Center));
+        content.AddChild(RaceUiAssets.Label(
+            $"{SideSummary(RaceTextCatalog.Get("result.local_time"), _settlement.Local)}\n{SideSummary(RaceTextCatalog.Get("result.enemy_time"), _settlement.Opponent)}",
+            19, StsColors.cream, HorizontalAlignment.Center));
+        content.AddChild(RaceUiAssets.Label(
+            RaceTextCatalog.Format("result.attempts", _settlement.Local.RestartCount, _settlement.Local.EventSlUsed, _settlement.Local.CombatSlUsed),
+            18, StsColors.lightGray, HorizontalAlignment.Center));
         if (_settlement.VisibleRatingDelta != 0)
             content.AddChild(RaceUiAssets.Label(
                 RaceTextCatalog.Format("result.rating", _settlement.VisibleRatingDelta), 22, StsColors.gold, HorizontalAlignment.Center));
@@ -406,6 +462,10 @@ public sealed partial class RaceSettlementOverlay : Control
 
     private static string SettlementReason(FinishReason reason) =>
         RaceTextCatalog.Get($"result.reason.{reason.ToString().ToLowerInvariant()}");
+
+    private static string SideSummary(string label, SettlementSide side) => side.CompletionMilliseconds is { } elapsed
+        ? $"{label}  {RaceUiAssets.FormatTime(TimeSpan.FromMilliseconds(elapsed))}"
+        : $"{label}  {RaceTextCatalog.Format("result.floor", side.HighestFloor)}";
 }
 
 internal static class RaceTelemetrySequence
