@@ -110,6 +110,7 @@ type SteamVerifier struct {
 	APIKey, AppID string
 	AllowDev      bool
 	Client        *http.Client
+	Endpoints     []string
 }
 
 func (v SteamVerifier) Verify(ctx context.Context, steamID, ticket string) error {
@@ -119,21 +120,43 @@ func (v SteamVerifier) Verify(ctx context.Context, steamID, ticket string) error
 		}
 		return errors.New("steam authentication is not configured")
 	}
-	endpoint := "https://partner.steam-api.com/ISteamUserAuth/AuthenticateUserTicket/v1/"
 	q := url.Values{"key": {v.APIKey}, "appid": {v.AppID}, "ticket": {ticket}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+q.Encode(), nil)
-	if err != nil {
-		return err
-	}
 	client := v.Client
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	endpoints := v.Endpoints
+	if len(endpoints) == 0 {
+		endpoints = []string{
+			"https://partner.steam-api.com/ISteamUserAuth/AuthenticateUserTicket/v1/",
+			"https://api.steampowered.com/ISteamUserAuth/AuthenticateUserTicket/v1/",
+		}
+	}
+	for index, endpoint := range endpoints {
+		err := verifySteamTicketEndpoint(ctx, client, endpoint+"?"+q.Encode(), steamID)
+		if errors.Is(err, errSteamPublisherForbidden) && index+1 < len(endpoints) {
+			continue
+		}
+		return err
+	}
+	return errors.New("steam authentication endpoint is not configured")
+}
+
+var errSteamPublisherForbidden = errors.New("steam publisher endpoint forbidden")
+
+func verifySteamTicketEndpoint(ctx context.Context, client *http.Client, endpoint, steamID string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		return errSteamPublisherForbidden
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("steam returned %s", resp.Status)
 	}
