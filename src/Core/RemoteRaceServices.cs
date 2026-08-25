@@ -68,6 +68,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     public event Action<SettlementSnapshot>? MatchSettled;
     public event Action<LegendDraftPrompt?>? LegendDraftChanged;
     public event Action<EntertainmentRoom?>? RoomChanged;
+    public event Action<string>? RoomExited;
     public event Action<RaceParty?>? PartyChanged;
     public event Action<RaceInvite>? InviteReceived;
 
@@ -389,6 +390,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
             _ = await PostAsync<JsonElement>($"v1/rooms/{CurrentRoom.Code}/leave", new { }, true, cancellationToken);
         CurrentRoom = null;
         RoomChanged?.Invoke(null);
+        RoomExited?.Invoke("left");
     }
     public Task InviteFriendAsync(string playerId, CancellationToken cancellationToken = default) => InviteAsync(playerId, cancellationToken);
 
@@ -594,6 +596,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                     case "entertainment_room_closed":
                         CurrentRoom = null;
                         RoomChanged?.Invoke(null);
+                        RoomExited?.Invoke("host_closed");
                         break;
                     case "party_updated": ApplyParty(data.Deserialize<PartyDto>(Json)!); break;
                     case "party_closed":

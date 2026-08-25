@@ -660,7 +660,7 @@ func (p *Postgres) SetRoomMember(ctx context.Context, code, playerID, characterI
 	return p.RoomSnapshot(ctx, code)
 }
 
-func (p *Postgres) StartRoom(ctx context.Context, code, playerID string) (EntertainmentRoomSnapshot, error) {
+func (p *Postgres) StartRoom(ctx context.Context, code, playerID, sharedSeed string) (EntertainmentRoomSnapshot, error) {
 	tx, err := p.Pool.Begin(ctx)
 	if err != nil {
 		return EntertainmentRoomSnapshot{}, err
@@ -682,6 +682,10 @@ func (p *Postgres) StartRoom(ctx context.Context, code, playerID string) (Entert
 	var rules domain.Rules
 	if err = json.Unmarshal(payload, &rules); err != nil {
 		return EntertainmentRoomSnapshot{}, err
+	}
+	if rules.RandomSeed {
+		rules.Seed = sharedSeed
+		payload, _ = json.Marshal(rules)
 	}
 	rows, err := tx.Query(ctx, `SELECT team,is_ready,character_id FROM entertainment_room_members WHERE code=$1`, code)
 	if err != nil {
@@ -709,7 +713,7 @@ func (p *Postgres) StartRoom(ctx context.Context, code, playerID string) (Entert
 	if rules.TeamSize == 1 && characters[1][0] != characters[2][0] {
 		return EntertainmentRoomSnapshot{}, errors.New("1v1 players must select the same character")
 	}
-	if _, err = tx.Exec(ctx, `UPDATE entertainment_rooms SET state='starting',started_at=now() WHERE code=$1`, code); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE entertainment_rooms SET rules=$2,state='starting',started_at=now() WHERE code=$1`, code, payload); err != nil {
 		return EntertainmentRoomSnapshot{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

@@ -620,7 +620,17 @@ func (s *Server) updateRoomMember(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) startRoom(w http.ResponseWriter, r *http.Request) {
 	claims, _ := auth.FromContext(r.Context())
-	room, err := s.Store.StartRoom(r.Context(), strings.ToUpper(r.PathValue("code")), claims.PlayerID)
+	seedA, err := roomCode()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	seedB, err := roomCode()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	room, err := s.Store.StartRoom(r.Context(), strings.ToUpper(r.PathValue("code")), claims.PlayerID, seedA+seedB)
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return

@@ -3,7 +3,7 @@
   "name": "Spire Race / 尖塔竞速",
   "author": "MCC",
   "description": "Native-style competitive speedrun matchmaking and race client.",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "has_pck": false,
   "has_dll": true,
   "dependencies": [],

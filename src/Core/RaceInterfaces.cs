@@ -69,6 +69,7 @@ public interface IRaceEntertainmentRoomService
 {
     EntertainmentRoom? CurrentRoom { get; }
     event Action<EntertainmentRoom?>? RoomChanged;
+    event Action<string>? RoomExited;
     Task<EntertainmentRoom> CreateRoomAsync(RaceRuleSet rules, CancellationToken cancellationToken = default);
     Task<EntertainmentRoom> JoinRoomAsync(string code, CancellationToken cancellationToken = default);
     Task<EntertainmentRoom> UpdateRoomRulesAsync(RaceRuleSet rules, CancellationToken cancellationToken = default);

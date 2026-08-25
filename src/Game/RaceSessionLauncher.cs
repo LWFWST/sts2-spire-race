@@ -73,7 +73,7 @@ public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyC
             var custom = mainMenu.SubmenuStack.GetSubmenuType<NCustomRunScreen>();
             custom.InitializeMultiplayerAsHost(service, (int)assignment.TeamSize);
             custom.Lobby.SyncAscensionChange(assignment.Rules.Ascension);
-            custom.Lobby.SetSeed(assignment.Rules.RandomSeed ? null : assignment.Rules.Seed);
+            custom.Lobby.SetSeed(string.IsNullOrWhiteSpace(assignment.Rules.Seed) ? null : assignment.Rules.Seed);
             custom.Lobby.SetModifiers(ResolveModifiers(assignment.Rules.Modifiers));
             screen = custom;
         }

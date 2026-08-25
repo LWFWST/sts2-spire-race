@@ -476,8 +476,24 @@ public static class RaceScreens
                 if (room is not null) page.Controller.EntertainmentRules = room.Rules;
                 RenderEntertainment(page, page.Controller.EntertainmentScrollPosition);
             });
+            void Exited(string reason) => Defer(page, () =>
+            {
+                page.Controller.CurrentEntertainmentRoom = null;
+                page.Controller.CanEditEntertainmentRules = true;
+                page.Controller.EntertainmentScrollPosition = 0;
+                RenderEntertainment(page);
+                if (reason == "host_closed")
+                    page.Status.SetTextAutoSize(RaceTextCatalog.Get("fun.room_closed_by_host"));
+            });
             rooms.RoomChanged += Changed;
-            page.AddCleanup(() => rooms.RoomChanged -= Changed);
+            rooms.RoomExited += Exited;
+            page.AddCleanup(() =>
+            {
+                rooms.RoomChanged -= Changed;
+                rooms.RoomExited -= Exited;
+                if (rooms.CurrentRoom is { State: "waiting" })
+                    _ = rooms.LeaveRoomAsync();
+            });
         }
         _ = ResolveEntertainmentHostAsync(page);
         RenderEntertainment(page);

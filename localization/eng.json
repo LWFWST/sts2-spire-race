@@ -172,6 +172,7 @@
   "fun.unready": "UNREADY",
   "fun.start": "START RACE",
   "fun.starting": "The host started the race. Creating the Steam lobby...",
+  "fun.room_closed_by_host": "The host closed the room. You have left the room.",
   "fun.connection_mode": "Connection coordination",
   "fun.connection_server": "Race server coordinated",
   "fun.connection_p2p": "Direct Steam P2P",

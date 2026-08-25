@@ -172,6 +172,7 @@
   "fun.unready": "取消准备",
   "fun.start": "开始竞速",
   "fun.starting": "房主已开始，正在建立 Steam 联机房间……",
+  "fun.room_closed_by_host": "房主已销毁房间，你已退出该房间。",
   "fun.connection_mode": "联机协调方式",
   "fun.connection_server": "竞赛服务器协调",
   "fun.connection_p2p": "Steam P2P 直连",
