@@ -573,6 +573,10 @@ public static class RaceScreens
             var switchButton = RaceUiAssets.Button(RaceTextCatalog.Get("fun.switch_team"), () => _ = SwitchEntertainmentTeamAsync(page), 19, new Vector2(190, 48));
             switchButton.SetEnabled(localMember?.IsReady != true && room.State == "waiting");
             roomActions.AddChild(switchButton);
+            var inviteButton = RaceUiAssets.Button(RaceTextCatalog.Get("common.invite"),
+                () => _ = InviteEntertainmentFriendsAsync(page), 19, new Vector2(190, 48));
+            inviteButton.SetEnabled(room.State == "waiting");
+            roomActions.AddChild(inviteButton);
             if (canEdit)
             {
                 var allReady = room.Members.Count == (int)rules.TeamSize * 2 && room.Members.All(x => x.IsReady) &&
@@ -617,7 +621,11 @@ public static class RaceScreens
         AddOption(root, RaceTextCatalog.Get("fun.connection_mode"), RaceTextCatalog.Get(
             rules.CoordinationMode == "p2p" ? "fun.connection_p2p" : "fun.connection_server"), () =>
         {
-            Apply(rules with { CoordinationMode = rules.CoordinationMode == "p2p" ? "server" : "p2p" });
+            var nextMode = rules.CoordinationMode == "p2p" ? "server" : "p2p";
+            Apply(rules with
+            {
+                CoordinationMode = nextMode
+            });
         }, page);
         AddOption(root, RaceTextCatalog.Get("fun.seed_mode"), RaceTextCatalog.Get(rules.RandomSeed ? "fun.random" : "fun.fixed"), () =>
         {
@@ -714,13 +722,16 @@ public static class RaceScreens
 
         if (room is null)
         {
-            var joinRow = OptionRow(RaceTextCatalog.Get("fun.room_code"));
-            var roomCode = RaceUiAssets.LineEdit("ABC234");
-            roomCode.MaxLength = 6;
-            joinRow.AddChild(roomCode);
-            var join = RaceUiAssets.Button(RaceTextCatalog.Get("fun.join"), () => _ = JoinEntertainmentRoomAsync(page, roomCode.Text), 20, new Vector2(180, 50));
-            joinRow.AddChild(join);
-            root.AddChild(joinRow);
+            if (rules.CoordinationMode != "p2p")
+            {
+                var joinRow = OptionRow(RaceTextCatalog.Get("fun.room_code"));
+                var roomCode = RaceUiAssets.LineEdit("ABC234");
+                roomCode.MaxLength = 6;
+                joinRow.AddChild(roomCode);
+                var join = RaceUiAssets.Button(RaceTextCatalog.Get("fun.join"), () => _ = JoinEntertainmentRoomAsync(page, roomCode.Text), 20, new Vector2(180, 50));
+                joinRow.AddChild(join);
+                root.AddChild(joinRow);
+            }
             var create = RaceUiAssets.Button(RaceTextCatalog.Get("fun.create"), () => _ = CreateEntertainmentRoomAsync(page), 25, new Vector2(360, 66));
             create.NormalTint = new Color("76552f");
             root.AddChild(create);
@@ -734,15 +745,9 @@ public static class RaceScreens
     {
         try
         {
-            await page.Controller.Services.AuthenticateAsync();
             RaceRules.Validate(page.Controller.EntertainmentRules);
-            if (page.Controller.EntertainmentRules.CoordinationMode == "p2p")
-            {
-                if (page.Controller.Services.SessionLauncher is not IRaceEntertainmentP2PLauncher p2p)
-                    throw new InvalidOperationException("Steam P2P launcher is unavailable.");
-                await p2p.LaunchDirectHostAsync(page.Controller.EntertainmentRules);
-                return;
-            }
+            if (page.Controller.EntertainmentRules.CoordinationMode != "p2p")
+                await page.Controller.Services.AuthenticateAsync();
             if (page.Controller.Services is not IRaceEntertainmentRoomService rooms)
                 throw new InvalidOperationException("Entertainment room service is unavailable.");
             var room = await rooms.CreateRoomAsync(page.Controller.EntertainmentRules);
@@ -758,6 +763,16 @@ public static class RaceScreens
         {
             Defer(page, () => page.Status.SetTextAutoSize(exception.Message));
         }
+    }
+
+    private static async Task InviteEntertainmentFriendsAsync(RacePage page)
+    {
+        try
+        {
+            if (page.Controller.Services is IRaceEntertainmentRoomService rooms)
+                await rooms.InviteFriendAsync(string.Empty);
+        }
+        catch (Exception exception) { Defer(page, () => page.Status.SetTextAutoSize(exception.Message)); }
     }
 
     private static async Task JoinEntertainmentRoomAsync(RacePage page, string code)
@@ -1374,7 +1389,7 @@ public static class RaceScreens
     {
         SetServiceStatus(page);
         page.Content.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("settings.server"), 30, StsColors.gold, HorizontalAlignment.Center, true));
-        var addressInput = RaceUiAssets.LineEdit("http://127.0.0.1:8080", RaceRuntimeInfo.ServerUri.ToString().TrimEnd('/'));
+        var addressInput = RaceUiAssets.LineEdit("http://127.0.0.1:8080", page.Controller.Services.ConfiguredServerUri?.ToString().TrimEnd('/') ?? string.Empty);
         addressInput.CustomMinimumSize = new Vector2(760, 58);
         addressInput.SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter;
         page.Content.AddChild(addressInput);
@@ -1382,6 +1397,7 @@ public static class RaceScreens
         var presets = ActionRow();
         presets.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("settings.local"), () => Apply("http://127.0.0.1:8080"), 20, new Vector2(230, 54)));
         presets.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("settings.official"), () => Apply(RaceRuntimeInfo.OfficialServerUrl), 20, new Vector2(230, 54)));
+        presets.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("settings.disconnect"), Disconnect, 20, new Vector2(230, 54)));
         page.Content.AddChild(presets);
 
         var actions = ActionRow();
@@ -1403,11 +1419,11 @@ public static class RaceScreens
                 return;
             }
             addressInput.Text = serverUri.AbsoluteUri.TrimEnd('/');
-            RaceRuntimeInfo.SaveServerUrl(serverUri.AbsoluteUri);
             page.Status.SetTextAutoSize(RaceTextCatalog.Get("settings.connecting"));
             try
             {
                 await page.Controller.Services.ChangeServerAsync(serverUri);
+                RaceRuntimeInfo.SaveServerUrl(serverUri.AbsoluteUri);
                 if (IsAlive(page))
                     page.Status.SetTextAutoSize(RaceTextCatalog.Get("settings.saved"));
                 if (RaceRuntimeInfo.IsOfficialServer(serverUri))
@@ -1420,6 +1436,15 @@ public static class RaceScreens
                 if (RaceRuntimeInfo.IsOfficialServer(serverUri))
                     page.Controller.ShowServerNotice(exception, serverUri);
             }
+        }
+
+        async void Disconnect()
+        {
+            await page.Controller.Services.ChangeServerAsync(null);
+            RaceRuntimeInfo.SaveServerUrl(string.Empty);
+            addressInput.Text = string.Empty;
+            if (IsAlive(page))
+                page.Status.SetTextAutoSize(RaceTextCatalog.Get("settings.disconnected"));
         }
     }
 
@@ -1713,7 +1738,9 @@ public static class RaceScreens
 
     private static bool IsAlive(GodotObject value) => GodotObject.IsInstanceValid(value);
     private static void SetServiceStatus(RacePage page) => page.Status.SetTextAutoSize(
-        RaceTextCatalog.Get(page.Controller.Services is DemoRaceServices ? "status.demo" : "status.online"));
+        RaceTextCatalog.Get(page.Controller.Services is DemoRaceServices
+            ? "status.demo"
+            : page.Controller.Services.ConfiguredServerUri is null ? "status.p2p_only" : "status.online"));
     private static string OnOff(bool value) => RaceTextCatalog.CurrentLanguage == "zhs" ? value ? "开启" : "关闭" : value ? "On" : "Off";
 
     private sealed record OriginalModifierChoice(string Id, string Title, string Description);

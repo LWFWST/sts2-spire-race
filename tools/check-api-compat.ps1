@@ -20,6 +20,8 @@ $checks = @(
     @{ File = "src\Core\Nodes\Screens\CharacterSelect\NCharacterSelectScreen.cs"; Pattern = "InitializeMultiplayerAsHost\("; Name = "NCharacterSelectScreen.InitializeMultiplayerAsHost" },
     @{ File = "src\Core\Nodes\Screens\CharacterSelect\NCharacterSelectScreen.cs"; Pattern = "InitializeMultiplayerAsClient\("; Name = "NCharacterSelectScreen.InitializeMultiplayerAsClient" },
     @{ File = "src\Core\Nodes\Screens\CustomRun\NCustomRunScreen.cs"; Pattern = "InitializeMultiplayerAsHost\("; Name = "NCustomRunScreen.InitializeMultiplayerAsHost" },
+    @{ File = "src\Core\Nodes\Screens\CustomRun\NCustomRunScreen.cs"; Pattern = "InitializeMultiplayerAsClient\("; Name = "NCustomRunScreen.InitializeMultiplayerAsClient" },
+    @{ File = "src\Core\Platform\Steam\SteamJoinCallbackHandler.cs"; Pattern = "OnSteamLobbyJoinRequested\(GameLobbyJoinRequested_t lobbyJoinRequest\)"; Name = "SteamJoinCallbackHandler.OnSteamLobbyJoinRequested" },
     @{ File = "src\Core\Nodes\Debug\NDevConsole.cs"; Pattern = "public override void _Input\(InputEvent inputEvent\)"; Name = "NDevConsole._Input" },
     @{ File = "src\Core\Nodes\Debug\NDevConsole.cs"; Pattern = "public void HideConsole\(\)"; Name = "NDevConsole.HideConsole" }
 )

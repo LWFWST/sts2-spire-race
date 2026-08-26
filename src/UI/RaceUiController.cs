@@ -16,6 +16,7 @@ public sealed partial class RaceUiController : Node
     private MegaCrit.Sts2.addons.mega_text.MegaLabel? _mainMenuLabel;
     private LocManager.LocaleChangeCallback? _localeCallback;
     private Action<RaceInvite>? _inviteCallback;
+    private Action<EntertainmentRoom?>? _roomCallback;
 
     public IRaceServices Services { get; private set; } = null!;
     public RaceRuleSet EntertainmentRules { get; set; } = RaceRules.EntertainmentDefault();
@@ -39,10 +40,23 @@ public sealed partial class RaceUiController : Node
                 : RaceTextCatalog.Format("invite.room_body", invite.DisplayName, invite.RoomCode),
             () => AcceptInviteAsync(invite))).CallDeferred();
         Services.InviteReceived += _inviteCallback;
+        if (Services is IRaceEntertainmentRoomService rooms)
+        {
+            _roomCallback = room => Callable.From(() =>
+            {
+                if (room is null || room.CoordinationMode != EntertainmentCoordinationMode.SteamP2P)
+                    return;
+                CurrentEntertainmentRoom = room;
+                EntertainmentRules = room.Rules;
+                if (_mainMenu.SubmenuStack.Peek() is not RacePage)
+                    OpenEntertainment();
+            }).CallDeferred();
+            rooms.RoomChanged += _roomCallback;
+        }
         if (!_startupAuthenticationAttempted)
         {
             _startupAuthenticationAttempted = true;
-            _ = AuthenticateAtStartupAsync();
+            _ = InitializeAtStartupAsync();
         }
         var performStartupNavigation = !_startupNavigationConsumed;
         _startupNavigationConsumed = true;
@@ -96,6 +110,8 @@ public sealed partial class RaceUiController : Node
             LocString.UnsubscribeToLocaleChange(_localeCallback);
         if (_inviteCallback is not null)
             Services.InviteReceived -= _inviteCallback;
+        if (_roomCallback is not null && Services is IRaceEntertainmentRoomService rooms)
+            rooms.RoomChanged -= _roomCallback;
     }
 
     public void OpenHub() => Open(RaceTextCatalog.Get("hub.title"), RaceScreens.BuildHub);
@@ -121,7 +137,7 @@ public sealed partial class RaceUiController : Node
 
     public void OpenQueue() => Open(RaceTextCatalog.Get("queue.title"), RaceScreens.BuildQueue);
     public void OpenRanked() => _ = OpenAuthenticatedAsync(() => Open(RaceTextCatalog.Get("rank.title"), RaceScreens.BuildRanked));
-    public void OpenEntertainment() => _ = OpenAuthenticatedAsync(() => Open(RaceTextCatalog.Get("fun.title"), RaceScreens.BuildEntertainment));
+    public void OpenEntertainment() => Open(RaceTextCatalog.Get("fun.title"), RaceScreens.BuildEntertainment);
     public void OpenProfile(string? playerId = null) => Open(RaceTextCatalog.Get("profile.title"), page => RaceScreens.BuildProfile(page, playerId));
     public void OpenFriends() => Open(RaceTextCatalog.Get("friends.title"), RaceScreens.BuildFriends);
     public void OpenLeaderboard() => Open(RaceTextCatalog.Get("leaderboard.title"), RaceScreens.BuildLeaderboard);
@@ -146,10 +162,15 @@ public sealed partial class RaceUiController : Node
         OpenDetails(RaceTextCatalog.Get("auth.notice_title"), body);
     }
 
-    private async Task AuthenticateAtStartupAsync()
+    private async Task InitializeAtStartupAsync()
     {
         try
         {
+            var identity = await Services.IdentityProvider.GetLocalIdentityAsync();
+            if (identity.PlatformId == 0 && !RaceRuntimeInfo.DevelopmentAuthentication)
+                throw new InvalidOperationException(RaceTextCatalog.Get("auth.steam_required"));
+            if (Services.ConfiguredServerUri is null)
+                return;
             await Services.AuthenticateAsync();
             if (Services is RemoteRaceServices remote)
                 await remote.WarmupAsync();

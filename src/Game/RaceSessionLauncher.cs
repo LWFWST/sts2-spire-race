@@ -14,9 +14,12 @@ using Sts2SpireRace.Core;
 
 namespace Sts2SpireRace.Game;
 
-public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyCoordinator, IRaceEntertainmentP2PLauncher
+public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyCoordinator
 {
     private readonly Dictionary<string, NSubmenu> _pendingSteamScreens = new();
+    public SteamP2PRaceCoordinator P2P { get; }
+
+    public RaceSessionLauncher() => P2P = new SteamP2PRaceCoordinator(this);
 
     public Task LaunchAsync(QueueRequest request, RaceTeam localTeam, RaceTeam opponentTeam, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
@@ -86,30 +89,6 @@ public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyC
         }
         _pendingSteamScreens[assignment.MatchId] = screen;
         return lobbyId;
-    }
-
-    public async Task LaunchDirectHostAsync(RaceRuleSet rules, CancellationToken cancellationToken = default)
-    {
-        var game = NGame.Instance ?? throw new InvalidOperationException("The game scene is not available.");
-        var mainMenu = game.MainMenu ?? throw new InvalidOperationException("The main menu is not available.");
-        var service = new NetHostGameService(PeerVersionInfo.LocalDefault());
-        var error = await service.StartSteamHost(Math.Clamp((int)rules.TeamSize * 2, 2, 4));
-        if (error.HasValue) throw new InvalidOperationException($"Steam lobby creation failed: {error.Value.GetReason()}");
-        cancellationToken.ThrowIfCancellationRequested();
-        var screen = mainMenu.SubmenuStack.GetSubmenuType<NCustomRunScreen>();
-        screen.InitializeMultiplayerAsHost(service, Math.Clamp((int)rules.TeamSize * 2, 2, 4));
-        screen.Lobby.SyncAscensionChange(rules.Ascension);
-        screen.Lobby.SetSeed(rules.RandomSeed ? null : rules.Seed);
-        screen.Lobby.SetModifiers(ResolveModifiers(rules.Modifiers));
-        var identity = await RaceServiceRegistry.Services.IdentityProvider.GetLocalIdentityAsync(cancellationToken);
-        var sessionId = $"p2p-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
-        var local = new RaceTeam(sessionId + "-local", "Steam P2P",
-            [new RaceParticipant(identity.PlatformId.ToString(), identity.DisplayName, "", true, true)]);
-        var opponent = new RaceTeam(sessionId + "-peer", "P2P peers", []);
-        RaceActiveSession.Begin(new MatchAssignment(sessionId, sessionId, RaceRuntimeInfo.GameVersion, QueueKind.Entertainment,
-            rules.TeamSize, rules, local, opponent, "", sessionId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
-        mainMenu.SubmenuStack.Push(screen);
-        Log.Info("[SpireRace] Opened a direct Steam P2P entertainment lobby without race-server match coordination.");
     }
 
     private async Task LaunchSteamTeamAsync(MatchAssignment assignment, CancellationToken cancellationToken)

@@ -88,6 +88,7 @@ public sealed class DemoRaceServicesTests
     [Fact]
     public void EntertainmentRulesValidateFixedSeedAndBounds()
     {
+        Assert.Equal("p2p", RaceRules.EntertainmentDefault().CoordinationMode);
         RaceRules.Validate(RaceRules.EntertainmentDefault());
         Assert.Throws<ArgumentException>(() => RaceRules.Validate(RaceRules.EntertainmentDefault() with
         {

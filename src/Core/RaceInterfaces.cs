@@ -22,9 +22,10 @@ public interface IRaceSteamLobbyCoordinator
     Task<ulong> CreateTeamLobbyAsync(MatchAssignment assignment, CancellationToken cancellationToken = default);
 }
 
-public interface IRaceEntertainmentP2PLauncher
+public interface IRaceEntertainmentP2PService : IRaceEntertainmentRoomService, IRaceMatchService
 {
-    Task LaunchDirectHostAsync(RaceRuleSet rules, CancellationToken cancellationToken = default);
+    Task OpenSteamInviteAsync(CancellationToken cancellationToken = default);
+    Task<bool> JoinInvitedLobbyAsync(ulong lobbyId, CancellationToken cancellationToken = default);
 }
 
 public interface IRaceAuthService
@@ -142,5 +143,6 @@ public interface IRaceServices :
 {
     IRacePlatformIdentityProvider IdentityProvider { get; }
     IRaceSessionLauncher SessionLauncher { get; }
-    Task ChangeServerAsync(Uri serverUri, CancellationToken cancellationToken = default);
+    Uri? ConfiguredServerUri { get; }
+    Task ChangeServerAsync(Uri? serverUri, CancellationToken cancellationToken = default);
 }

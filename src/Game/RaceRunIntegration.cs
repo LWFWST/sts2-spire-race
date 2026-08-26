@@ -50,7 +50,7 @@ public sealed partial class RaceRunIntegration : Node
     private bool _finishedReported;
     private bool _initialized;
     private RaceRunHud? _hud;
-    private bool IsLocalEntertainment => _match.Kind == QueueKind.Entertainment && _match.Rules.CoordinationMode == "p2p";
+    private bool IsP2PEntertainment => _match.Kind == QueueKind.Entertainment && _match.Rules.CoordinationMode == "p2p";
 
     public void Configure(RunState state, MatchAssignment match)
     {
@@ -106,11 +106,6 @@ public sealed partial class RaceRunIntegration : Node
         {
             _finishedReported = true;
             var elapsed = ElapsedMilliseconds();
-            if (IsLocalEntertainment)
-            {
-                ShowLocalEntertainmentSettlement(true, elapsed);
-                return;
-            }
             _ = ReportAsync(_checkpoint with
             {
                 Sequence = RaceTelemetrySequence.Next(_checkpoint.GameId),
@@ -123,12 +118,6 @@ public sealed partial class RaceRunIntegration : Node
         if (_state.IsGameOver && !_deathShown)
         {
             _deathShown = true;
-            if (IsLocalEntertainment)
-            {
-                _finishedReported = true;
-                ShowLocalEntertainmentSettlement(false, ElapsedMilliseconds());
-                return;
-            }
             var overlay = new RaceDeathChoiceOverlay { Name = "SpireRaceDeathChoice", ZIndex = 1000 };
             overlay.Configure(this, RaceRules.DeathDecisionSeconds);
             NRun.Instance!.GlobalUi.AddChild(overlay);
@@ -191,32 +180,13 @@ public sealed partial class RaceRunIntegration : Node
     private async Task ReportAsync(ProgressCheckpoint checkpoint)
     {
         _checkpoint = checkpoint;
-        if (IsLocalEntertainment)
-            return;
         await _matches.ReportProgressAsync(checkpoint, $"{checkpoint.GameId}:{checkpoint.Sequence}");
-    }
-
-    private void ShowLocalEntertainmentSettlement(bool completed, long elapsed)
-    {
-        if (_checkpoint is null)
-            return;
-        var local = new SettlementSide(_match.LocalTeam.Id, _match.LocalTeam.Name,
-            completed ? ParticipantOutcome.Finished : ParticipantOutcome.ScoreLocked,
-            _checkpoint.Floor, _checkpoint.FloorEnteredAtMilliseconds, completed ? elapsed : null,
-            _checkpoint.RestartCount, _checkpoint.EventSlUsed, _checkpoint.CombatSlUsed);
-        var opponent = new SettlementSide(_match.OpponentTeam.Id, _match.OpponentTeam.Name,
-            ParticipantOutcome.ScoreLocked, 0, 0, null, 0, 0, 0);
-        var settlement = new SettlementSnapshot(_match.MatchId, _match.GameId,
-            completed ? _match.LocalTeam.Id : _match.OpponentTeam.Id,
-            completed ? FinishReason.BossCompletion : FinishReason.HighestFloor,
-            local, opponent, 0, [], "local-p2p-entertainment", DateTimeOffset.UtcNow);
-        Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement, _match)).CallDeferred();
     }
 
     private long ElapsedMilliseconds()
     {
-        if (IsLocalEntertainment)
-            return RunManager.Instance.RunTime * 1000;
+        if (IsP2PEntertainment)
+            return Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _match.StartedAtUnixMilliseconds);
         if (_clock?.CurrentClock is { IsSynchronized: true } snapshot)
             return Math.Max(0, snapshot.ElapsedMilliseconds +
                 (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - snapshot.ServerUnixMilliseconds));
@@ -251,6 +221,7 @@ public sealed partial class RaceRunHud : Control
     private int _combatSlUsed;
     private bool _built;
     private Godot.Timer? _refreshTimer;
+    private long _localStartedAtTicks;
 
     public void Configure(MatchAssignment match, IRaceClockService? clock, IRaceMatchService matches) { _match = match; _clock = clock; _matches = matches; }
 
@@ -269,6 +240,7 @@ public sealed partial class RaceRunHud : Control
         if (_built)
             return;
         _built = true;
+        _localStartedAtTicks = checked((long)Time.GetTicksMsec());
         SetAnchorsPreset(LayoutPreset.TopWide);
         OffsetLeft = 370;
         OffsetTop = 150;
@@ -317,7 +289,12 @@ public sealed partial class RaceRunHud : Control
     private void Refresh()
     {
         if (_label is null) return;
-        var elapsed = _snapshot.IsSynchronized ? _snapshot.ElapsedMilliseconds + checked((long)Time.GetTicksMsec()) - _snapshotAtTicks : 0;
+        var now = checked((long)Time.GetTicksMsec());
+        var elapsed = _snapshot.IsSynchronized
+            ? _snapshot.ElapsedMilliseconds + now - _snapshotAtTicks
+            : _match.Kind == QueueKind.Entertainment && _match.Rules.CoordinationMode == "p2p"
+                ? Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _match.StartedAtUnixMilliseconds)
+                : Math.Max(0, now - _localStartedAtTicks);
         var eventRemaining = Math.Max(0, _match.Rules.EventSlLimit - _eventSlUsed);
         var combatRemaining = Math.Max(0, _match.Rules.CombatSlLimit - _combatSlUsed);
         _label.SetTextAutoSize($"RACE  {RaceRules.FormatElapsed(elapsed)}     F{_floor}     A{_match.Rules.Ascension}     SL  {eventRemaining}E / {combatRemaining}C");

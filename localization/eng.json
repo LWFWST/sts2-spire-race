@@ -171,11 +171,15 @@
   "fun.ready": "READY",
   "fun.unready": "UNREADY",
   "fun.start": "START RACE",
-  "fun.starting": "The host started the race. Creating the Steam lobby...",
+  "fun.starting": "The host started the race. Creating both Steam race lobbies...",
   "fun.room_closed_by_host": "The host closed the room. You have left the room.",
   "fun.connection_mode": "Connection coordination",
   "fun.connection_server": "Race server coordinated",
-  "fun.connection_p2p": "Direct Steam P2P",
+  "fun.connection_p2p": "Steam P2P Friend Race",
+  "fun.p2p_invite_only": "Join P2P entertainment races through a Steam friend invitation.",
+  "fun.steam_overlay_required": "The Steam overlay is unavailable. Enable the in-game overlay in Steam first.",
+  "fun.team_full": "That team is already full.",
+  "fun.everyone_ready_required": "Both teams must be full and every player ready before the host can start the race.",
   "fun.section.room": "ROOM AND SEED",
   "fun.section.run": "RACE RULES",
   "fun.section.access": "SPECTATING AND ACCESS",
@@ -249,15 +253,20 @@
   "settings.server": "Server address",
   "settings.official": "Official server",
   "settings.local": "Local server",
+  "settings.disconnect": "Disconnect",
   "settings.save": "SAVE & APPLY",
   "settings.saved": "Server address saved. Connection successful.",
+  "settings.disconnected": "Disconnected from the race server. Steam P2P entertainment remains available.",
   "settings.connecting": "Connecting to the selected race server...",
   "settings.failed": "Server connection failed: {0}",
   "settings.invalid": "Server address must start with http:// or https://.",
   "status.offline_identity": "Steam identity unavailable; using a local Spire profile.",
   "status.demo": "Development demo mode — results are not uploaded.",
+  "status.p2p_only": "No race server connected; Steam P2P entertainment is available.",
   "status.online": "Connected to the race server; official results are server-adjudicated."
   ,"auth.beta_access_required": "Spire Race is currently in closed beta. Bugs are expected and server capacity is limited, so access is available to selected players. Email spirerace@163.com to request free beta access.\n\nYou can support server costs at Afdian https://ifdian.net/a/spirerace or Ko-fi https://ko-fi.com/spirerace.\n\nThe project is open source: you may modify it or deploy your own server."
   ,"auth.notice_title": "Spire Race Server Notice"
   ,"auth.steam_login_failed": "Steam sign-in failed: {0}"
+  ,"auth.server_not_connected": "No race server is connected. Select one in Settings first."
+  ,"auth.steam_required": "Spire Race requires Steam to be running with a signed-in account."
 }

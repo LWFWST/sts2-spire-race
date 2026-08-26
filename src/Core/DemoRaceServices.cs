@@ -39,7 +39,8 @@ public sealed class DemoRaceServices : IRaceServices
         IsAuthenticated = true;
     }
     public Task ResumeAsync(CancellationToken cancellationToken = default) => AuthenticateAsync(cancellationToken);
-    public Task ChangeServerAsync(Uri serverUri, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public Uri? ConfiguredServerUri => null;
+    public Task ChangeServerAsync(Uri? serverUri, CancellationToken cancellationToken = default) => Task.CompletedTask;
     public QueueSnapshot CurrentQueue { get; private set; } = new(QueueState.Idle);
     public event Action<QueueSnapshot>? QueueChanged;
     public event Action<RaceInvite>? InviteReceived { add { } remove { } }

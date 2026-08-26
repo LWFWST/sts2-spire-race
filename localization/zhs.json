@@ -171,11 +171,15 @@
   "fun.ready": "准备",
   "fun.unready": "取消准备",
   "fun.start": "开始竞速",
-  "fun.starting": "房主已开始，正在建立 Steam 联机房间……",
+  "fun.starting": "房主已开始，正在建立双方的 Steam 竞速房间……",
   "fun.room_closed_by_host": "房主已销毁房间，你已退出该房间。",
   "fun.connection_mode": "联机协调方式",
   "fun.connection_server": "竞赛服务器协调",
-  "fun.connection_p2p": "Steam P2P 直连",
+  "fun.connection_p2p": "Steam P2P 好友竞技",
+  "fun.p2p_invite_only": "P2P 娱乐竞速请通过 Steam 好友邀请加入。",
+  "fun.steam_overlay_required": "Steam 界面不可用，请先在 Steam 中启用游戏内界面。",
+  "fun.team_full": "该队伍已经满员。",
+  "fun.everyone_ready_required": "双方队伍必须满员且所有玩家都已准备，房主才能开始竞速。",
   "fun.section.room": "房间与种子",
   "fun.section.run": "竞速规则",
   "fun.section.access": "观战与权限",
@@ -249,15 +253,20 @@
   "settings.server": "服务器地址",
   "settings.official": "官方服务器",
   "settings.local": "本机服务器",
+  "settings.disconnect": "断开服务器",
   "settings.save": "保存并应用",
   "settings.saved": "服务器地址已保存，连接成功。",
+  "settings.disconnected": "已断开竞赛服务器。Steam P2P 娱乐联机仍可使用。",
   "settings.connecting": "正在连接指定的竞速服务器……",
   "settings.failed": "服务器连接失败：{0}",
   "settings.invalid": "服务器地址必须以 http:// 或 https:// 开头。",
   "status.offline_identity": "无法读取 Steam 身份，已使用本地尖塔档案。",
   "status.demo": "开发演示模式——战绩不会上传。",
+  "status.p2p_only": "未连接竞赛服务器；Steam P2P 娱乐联机可用。",
   "status.online": "已连接竞速服务器；正式比赛由服务器裁定。"
   ,"auth.beta_access_required": "现在处于内测阶段，可能会有 bug，且服务器吞吐量较低，因此仅对部分玩家开放。你可以联系 spirerace@163.com 免费申请内测。\n\n你也可以通过爱发电 https://ifdian.net/a/spirerace 或 Ko-fi https://ko-fi.com/spirerace 捐赠，以支持服务器。\n\n项目已经开源，你可以进行二次开发，也可以自行部署服务器。"
   ,"auth.notice_title": "尖塔竞速服务器提示"
   ,"auth.steam_login_failed": "Steam 登录失败：{0}"
+  ,"auth.server_not_connected": "尚未连接竞赛服务器。请先在设置中选择服务器。"
+  ,"auth.steam_required": "尖塔竞速需要 Steam 正常运行并完成账号登录。"
 }

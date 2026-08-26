@@ -17,7 +17,9 @@ internal static class RaceSaveAndQuitPatch
     [HarmonyPrefix]
     private static bool Prefix(NPauseMenu __instance, NButton __0)
     {
-        if (RaceActiveSession.Current is null || RaceServiceRegistry.Services is not IRaceMatchService matches)
+        if (RaceActiveSession.Current is not { } active || RaceServiceRegistry.Services is not IRaceMatchService matches)
+            return true;
+        if (active.Kind == QueueKind.Entertainment && active.Rules.CoordinationMode == "p2p")
             return true;
         _ = HandleAsync(__instance, matches);
         return false;
@@ -139,7 +141,8 @@ public sealed partial class RaceSurrenderOverlay : Control
     }
     private async Task ConfirmAsync()
     {
-        var teamSize = (_matches.CurrentMatch ?? RaceActiveSession.Current)?.TeamSize ?? TeamSize.One;
+        var match = _matches.CurrentMatch ?? RaceActiveSession.Current;
+        var teamSize = match?.TeamSize ?? TeamSize.One;
         await _matches.VoteSurrenderAsync(true);
         QueueFree();
         if (teamSize == TeamSize.One)

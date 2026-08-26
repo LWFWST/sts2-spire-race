@@ -37,7 +37,8 @@ public static class RaceRules
         AllowDuplicateCharacters = true,
         TimeLimitMinutes = 180,
         Visibility = "friends",
-        Modifiers = ["Draft", "Hoarder"]
+        Modifiers = ["Draft", "Hoarder"],
+        CoordinationMode = "p2p"
     };
 
     public static int SelectCasualAscension(Random random) =>

@@ -6,7 +6,7 @@ namespace Sts2SpireRace.Game;
 public static class RaceRuntimeInfo
 {
     public const string OfficialServerUrl = "https://spirerace.xyz/";
-    public const string DefaultServerUrl = OfficialServerUrl;
+    public const string DefaultServerUrl = "";
 
     public static string GameVersion
     {
@@ -17,7 +17,7 @@ public static class RaceRuntimeInfo
         }
     }
 
-    public static Uri ServerUri
+    public static Uri? ServerUri
     {
         get
         {
@@ -25,9 +25,11 @@ public static class RaceRuntimeInfo
             if (!string.IsNullOrWhiteSpace(configured))
                 return new Uri(configured.TrimEnd('/') + "/");
             var saved = LoadServerUrl();
-            return new Uri(string.IsNullOrWhiteSpace(saved) ? DefaultServerUrl : saved.TrimEnd('/') + "/");
+            return string.IsNullOrWhiteSpace(saved) ? null : new Uri(saved.TrimEnd('/') + "/");
         }
     }
+
+    public static bool HasConfiguredServer => ServerUri is not null;
 
     public static void SaveServerUrl(string url)
     {
@@ -35,7 +37,8 @@ public static class RaceRuntimeInfo
         {
             var path = Godot.ProjectSettings.GlobalizePath("user://stsrace_server.json");
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, JsonSerializer.Serialize(new ServerSettings(url?.Trim() ?? string.Empty)));
+            var normalized = url?.Trim() ?? string.Empty;
+            File.WriteAllText(path, JsonSerializer.Serialize(new ServerSettings(normalized, normalized.Length > 0)));
         }
         catch
         {
@@ -44,7 +47,8 @@ public static class RaceRuntimeInfo
     }
 
     public static bool IsOfficialServer(Uri? uri = null) =>
-        string.Equals((uri ?? ServerUri).Host, new Uri(OfficialServerUrl).Host, StringComparison.OrdinalIgnoreCase);
+        (uri ?? ServerUri) is { } selected &&
+        string.Equals(selected.Host, new Uri(OfficialServerUrl).Host, StringComparison.OrdinalIgnoreCase);
 
     public static string LoadServerUrl()
     {
@@ -54,7 +58,7 @@ public static class RaceRuntimeInfo
             if (!File.Exists(path))
                 return string.Empty;
             var settings = JsonSerializer.Deserialize<ServerSettings>(File.ReadAllText(path));
-            return settings?.ServerUrl?.Trim() ?? string.Empty;
+            return settings?.ConnectOnStartup == true ? settings.ServerUrl?.Trim() ?? string.Empty : string.Empty;
         }
         catch
         {
@@ -62,7 +66,7 @@ public static class RaceRuntimeInfo
         }
     }
 
-    private sealed record ServerSettings(string ServerUrl);
+    private sealed record ServerSettings(string ServerUrl, bool ConnectOnStartup = false);
 
     public static bool DevelopmentAuthentication =>
         Godot.OS.GetCmdlineArgs().Contains("--spire-race-dev-auth");

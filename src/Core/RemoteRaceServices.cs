@@ -24,6 +24,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
 
     private HttpClient _http;
     private readonly DemoRaceServices _secondary;
+    private readonly IRaceEntertainmentP2PService? _p2p;
     private readonly SteamWebApiTicketProvider _ticketProvider = new();
     private readonly SemaphoreSlim _authenticationLock = new(1, 1);
     private readonly SemaphoreSlim _socketWriteLock = new(1, 1);
@@ -47,11 +48,20 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         IdentityProvider = identityProvider;
         SessionLauncher = sessionLauncher ?? new NoOpSessionLauncher();
         _secondary = new DemoRaceServices(identityProvider, SessionLauncher);
+        _p2p = sessionLauncher is RaceSessionLauncher raceLauncher ? raceLauncher.P2P : sessionLauncher as IRaceEntertainmentP2PService;
+        if (_p2p is not null)
+        {
+            _p2p.RoomChanged += OnP2PRoomChanged;
+            _p2p.RoomExited += OnP2PRoomExited;
+            _p2p.MatchChanged += OnP2PMatchChanged;
+            _p2p.MatchSettled += OnP2PMatchSettled;
+        }
         _http = CreateHttpClient(serverUri ?? RaceRuntimeInfo.ServerUri);
     }
 
     public IRacePlatformIdentityProvider IdentityProvider { get; }
     public IRaceSessionLauncher SessionLauncher { get; }
+    public Uri? ConfiguredServerUri => _http.BaseAddress;
     public QueueSnapshot CurrentQueue { get; private set; } = new(QueueState.Idle);
     public MatchAssignment? CurrentMatch { get; private set; }
     public SettlementSnapshot? CurrentSettlement { get; private set; }
@@ -74,6 +84,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
 
     public async Task AuthenticateAsync(CancellationToken cancellationToken = default)
     {
+        RequireConfiguredServer();
         if (IsAuthenticated)
             return;
         await _authenticationLock.WaitAsync(cancellationToken);
@@ -105,9 +116,9 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
 
     public Task ResumeAsync(CancellationToken cancellationToken = default) => AuthenticateAsync(cancellationToken);
 
-    public async Task ChangeServerAsync(Uri serverUri, CancellationToken cancellationToken = default)
+    public async Task ChangeServerAsync(Uri? serverUri, CancellationToken cancellationToken = default)
     {
-        var normalized = new Uri((serverUri.AbsoluteUri.TrimEnd('/') + "/"));
+        var normalized = serverUri is null ? null : new Uri(serverUri.AbsoluteUri.TrimEnd('/') + "/");
         var previousHttp = _http;
         _socketLifetime?.Cancel();
         if (_socket is not null)
@@ -127,12 +138,18 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         CurrentLegendDraft = null;
         CurrentRoom = null;
         CurrentParty = null;
+        LastVerdict = IntegrityVerdict.Pending;
+        CurrentClock = new ServerClockSnapshot(0, 0, 0, 0, false);
+        _integrityVerifiedAt = default;
+        _lastClockSyncLocalMilliseconds = 0;
         CurrentQueue = new QueueSnapshot(QueueState.Idle, Detail: "server_changed");
         MatchChanged?.Invoke(null);
         RoomChanged?.Invoke(null);
         PartyChanged?.Invoke(null);
         QueueChanged?.Invoke(CurrentQueue);
         previousHttp.Dispose();
+        if (normalized is null)
+            return;
         await EnsureOnlineReadyAsync(cancellationToken, verifyIntegrity: false);
     }
 
@@ -145,6 +162,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                 return false;
             var cached = JsonSerializer.Deserialize<CredentialCache>(await File.ReadAllTextAsync(path, cancellationToken), Json);
             if (cached is null || cached.PlayerId != playerId || string.IsNullOrWhiteSpace(cached.RefreshToken))
+                return false;
+            if (!string.Equals(cached.ServerOrigin, ServerOrigin(), StringComparison.OrdinalIgnoreCase))
                 return false;
             var response = await PostAsync<AuthResponse>("v1/auth/refresh", new { refresh_token = cached.RefreshToken }, false, cancellationToken);
             ApplyAuthentication(response, playerId);
@@ -165,7 +184,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
             return;
         var path = Godot.ProjectSettings.GlobalizePath("user://stsrace_credentials.json");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllText(path, JsonSerializer.Serialize(new CredentialCache(playerId, _refreshToken), Json));
+        File.WriteAllText(path, JsonSerializer.Serialize(new CredentialCache(playerId, _refreshToken, ServerOrigin()), Json));
     }
 
     public async Task JoinQueueAsync(QueueRequest request, CancellationToken cancellationToken = default)
@@ -290,8 +309,11 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         catch { /* Queue entry will surface a localized connection/integrity error. */ }
     }
 
-    public Task ReportProgressAsync(ProgressCheckpoint checkpoint, string idempotencyKey, CancellationToken cancellationToken = default) =>
-        SendSocketAsync("progress", new
+    public Task ReportProgressAsync(ProgressCheckpoint checkpoint, string idempotencyKey, CancellationToken cancellationToken = default)
+    {
+        if (IsP2PMatch)
+            return _p2p!.ReportProgressAsync(checkpoint, idempotencyKey, cancellationToken);
+        return SendSocketAsync("progress", new
         {
             idempotency_key = idempotencyKey,
             progress = new
@@ -310,10 +332,17 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                 combat_sl_used = checkpoint.CombatSlUsed
             }
         }, cancellationToken);
-    public Task ChooseDeathActionAsync(bool restart, CancellationToken cancellationToken = default) =>
-        SendSocketAsync("death_choice", new { restart }, cancellationToken);
+    }
+    public Task ChooseDeathActionAsync(bool restart, CancellationToken cancellationToken = default) => IsP2PMatch
+        ? _p2p!.ChooseDeathActionAsync(restart, cancellationToken)
+        : SendSocketAsync("death_choice", new { restart }, cancellationToken);
     public async Task RequestSaveAndQuitAsync(SlCategory category, bool confirmForfeit, CancellationToken cancellationToken = default)
     {
+        if (IsP2PMatch)
+        {
+            await _p2p!.RequestSaveAndQuitAsync(category, confirmForfeit, cancellationToken);
+            return;
+        }
         _saveQuitReply = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         await SendSocketAsync("save_quit", new { combat = category == SlCategory.Combat, confirm_forfeit = confirmForfeit }, cancellationToken);
         try
@@ -323,11 +352,13 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         }
         finally { _saveQuitReply = null; }
     }
-    public Task ResumeSavedRunAsync(string idempotencyKey, CancellationToken cancellationToken = default) =>
-        SendSocketAsync("resume", new { idempotency_key = idempotencyKey }, cancellationToken);
+    public Task ResumeSavedRunAsync(string idempotencyKey, CancellationToken cancellationToken = default) => IsP2PMatch
+        ? _p2p!.ResumeSavedRunAsync(idempotencyKey, cancellationToken)
+        : SendSocketAsync("resume", new { idempotency_key = idempotencyKey }, cancellationToken);
     public Task SurrenderAsync(CancellationToken cancellationToken = default) => VoteSurrenderAsync(true, cancellationToken);
-    public Task VoteSurrenderAsync(bool accept, CancellationToken cancellationToken = default) =>
-        SendSocketAsync("surrender_vote", new { accept }, cancellationToken);
+    public Task VoteSurrenderAsync(bool accept, CancellationToken cancellationToken = default) => IsP2PMatch
+        ? _p2p!.VoteSurrenderAsync(accept, cancellationToken)
+        : SendSocketAsync("surrender_vote", new { accept }, cancellationToken);
     public Task SubmitLegendBansAsync(string banOne, string banTwo, CancellationToken cancellationToken = default) =>
         SendSocketAsync("legend_bans", new { ban_one = banOne, ban_two = banTwo }, cancellationToken);
     public Task SelectLegendCharacterAsync(string characterId, CancellationToken cancellationToken = default) =>
@@ -335,6 +366,11 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
 
     public async Task<EntertainmentRoom> CreateRoomAsync(RaceRuleSet rules, CancellationToken cancellationToken = default)
     {
+        if (rules.CoordinationMode == "p2p")
+        {
+            if (_p2p is null) throw new InvalidOperationException("Steam P2P race coordination is unavailable.");
+            return await _p2p.CreateRoomAsync(rules, cancellationToken);
+        }
         await EnsureOnlineReadyAsync(cancellationToken, verifyIntegrity: false);
         var room = await PostAsync<RoomDto>("v1/rooms", ToServerRules(rules), true, cancellationToken);
         return ApplyRoom(room);
@@ -349,12 +385,16 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     public async Task<EntertainmentRoom> UpdateRoomRulesAsync(RaceRuleSet rules, CancellationToken cancellationToken = default)
     {
         if (CurrentRoom is null) throw new InvalidOperationException("No entertainment room is active.");
+        if (CurrentRoom.CoordinationMode == EntertainmentCoordinationMode.SteamP2P)
+            return await _p2p!.UpdateRoomRulesAsync(rules, cancellationToken);
         var room = await PutAsync<RoomDto>($"v1/rooms/{CurrentRoom.Code}/rules", ToServerRules(rules), true, cancellationToken);
         return ApplyRoom(room);
     }
     public async Task<EntertainmentRoom> SwitchTeamAsync(CancellationToken cancellationToken = default)
     {
         if (CurrentRoom is null) throw new InvalidOperationException("No entertainment room is active.");
+        if (CurrentRoom.CoordinationMode == EntertainmentCoordinationMode.SteamP2P)
+            return await _p2p!.SwitchTeamAsync(cancellationToken);
         var room = await PostAsync<RoomDto>($"v1/rooms/{CurrentRoom.Code}/team", new { }, true, cancellationToken);
         return ApplyRoom(room);
     }
@@ -362,6 +402,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     public async Task<EntertainmentRoom> SetRoomMemberAsync(string characterId, bool ready, CancellationToken cancellationToken = default)
     {
         if (CurrentRoom is null) throw new InvalidOperationException("No entertainment room is active.");
+        if (CurrentRoom.CoordinationMode == EntertainmentCoordinationMode.SteamP2P)
+            return await _p2p!.SetRoomMemberAsync(characterId, ready, cancellationToken);
         var room = await PutAsync<RoomDto>($"v1/rooms/{CurrentRoom.Code}/member", new { character_id = characterId, ready }, true, cancellationToken);
         return ApplyRoom(room);
     }
@@ -369,12 +411,19 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     public async Task<EntertainmentRoom> StartRoomAsync(CancellationToken cancellationToken = default)
     {
         if (CurrentRoom is null) throw new InvalidOperationException("No entertainment room is active.");
+        if (CurrentRoom.CoordinationMode == EntertainmentCoordinationMode.SteamP2P)
+            return await _p2p!.StartRoomAsync(cancellationToken);
         var room = await PostAsync<RoomDto>($"v1/rooms/{CurrentRoom.Code}/start", new { }, true, cancellationToken);
         return ApplyRoom(room);
     }
     public async Task LeaveRoomAsync(CancellationToken cancellationToken = default)
     {
         var room = CurrentRoom;
+        if (room?.CoordinationMode == EntertainmentCoordinationMode.SteamP2P)
+        {
+            await _p2p!.LeaveRoomAsync(cancellationToken);
+            return;
+        }
         if (room is not null)
         {
             try
@@ -392,7 +441,10 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         RoomChanged?.Invoke(null);
         RoomExited?.Invoke("left");
     }
-    public Task InviteFriendAsync(string playerId, CancellationToken cancellationToken = default) => InviteAsync(playerId, cancellationToken);
+    public Task InviteFriendAsync(string playerId, CancellationToken cancellationToken = default) =>
+        CurrentRoom?.CoordinationMode == EntertainmentCoordinationMode.SteamP2P
+            ? _p2p!.OpenSteamInviteAsync(cancellationToken)
+            : InviteAsync(playerId, cancellationToken);
 
     public async Task OpenPartyLobbyAsync(QueueKind kind, TeamSize teamSize, CancellationToken cancellationToken = default)
     {
@@ -724,11 +776,23 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         return await ReadAsync<T>(response, cancellationToken);
     }
 
-    private static HttpClient CreateHttpClient(Uri baseAddress)
+    private static HttpClient CreateHttpClient(Uri? baseAddress)
     {
         var client = new HttpClient { BaseAddress = baseAddress, Timeout = TimeSpan.FromSeconds(15) };
         client.DefaultRequestHeaders.Add("X-Spire-Race-Game-Version", RaceRuntimeInfo.GameVersion);
         return client;
+    }
+
+    private void RequireConfiguredServer()
+    {
+        if (_http.BaseAddress is null)
+            throw new InvalidOperationException(RaceTextCatalog.Get("auth.server_not_connected"));
+    }
+
+    private string ServerOrigin()
+    {
+        var uri = _http.BaseAddress ?? throw new InvalidOperationException(RaceTextCatalog.Get("auth.server_not_connected"));
+        return uri.GetLeftPart(UriPartial.Authority).TrimEnd('/');
     }
 
     private async Task<T> PostAsync<T>(string path, object payload, bool authenticated, CancellationToken cancellationToken)
@@ -803,6 +867,45 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         RoomChanged?.Invoke(room);
         return room;
     }
+    private bool IsP2PMatch => CurrentMatch is { Kind: QueueKind.Entertainment, Rules.CoordinationMode: "p2p" } && _p2p is not null;
+    private void OnP2PRoomChanged(EntertainmentRoom? room)
+    {
+        CurrentRoom = room;
+        RoomChanged?.Invoke(room);
+    }
+    private void OnP2PRoomExited(string reason)
+    {
+        CurrentRoom = null;
+        RoomChanged?.Invoke(null);
+        RoomExited?.Invoke(reason);
+    }
+    private void OnP2PMatchChanged(MatchAssignment? match)
+    {
+        CurrentMatch = match;
+        if (match is not null)
+        {
+            _localTeam = match.LocalTeam;
+            _opponentTeam = match.OpponentTeam;
+            _queueRequest = new QueueRequest(QueueKind.Entertainment, match.TeamSize, null, match.Rules);
+            CurrentSettlement = null;
+            SetQueue(new QueueSnapshot(QueueState.Starting, _queueRequest, _localTeam, _opponentTeam, Detail: "p2p_starting"));
+        }
+        MatchChanged?.Invoke(match);
+    }
+    private void OnP2PMatchSettled(SettlementSnapshot settlement)
+    {
+        if (CurrentMatch is null)
+            return;
+        CurrentSettlement = settlement;
+        MatchSettled?.Invoke(settlement);
+        var localTime = settlement.Local.CompletionMilliseconds is { } localMs ? TimeSpan.FromMilliseconds(localMs) : (TimeSpan?)null;
+        var opponentTime = settlement.Opponent.CompletionMilliseconds is { } opponentMs ? TimeSpan.FromMilliseconds(opponentMs) : (TimeSpan?)null;
+        _localTeam = CurrentMatch.LocalTeam with { SharedRunTime = localTime };
+        _opponentTeam = CurrentMatch.OpponentTeam with { SharedRunTime = opponentTime };
+        var result = new RaceResult(settlement.MatchId, _localTeam, _opponentTeam,
+            settlement.WinnerTeamId == _localTeam.Id, 0, settlement.CompletedAt, settlement);
+        SetQueue(new QueueSnapshot(QueueState.Completed, _queueRequest, _localTeam, _opponentTeam, result, "p2p_completed"));
+    }
     private RaceParty ApplyParty(PartyDto x)
     {
         var identityId = (_identity?.PlatformId ?? 0).ToString();
@@ -863,6 +966,13 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     {
         _socketLifetime?.Cancel();
         if (_socket is not null) _socket.Dispose();
+        if (_p2p is not null)
+        {
+            _p2p.RoomChanged -= OnP2PRoomChanged;
+            _p2p.RoomExited -= OnP2PRoomExited;
+            _p2p.MatchChanged -= OnP2PMatchChanged;
+            _p2p.MatchSettled -= OnP2PMatchSettled;
+        }
         _ticketProvider.Dispose(); _http.Dispose(); _authenticationLock.Dispose(); _socketWriteLock.Dispose(); _integrityLock.Dispose();
         await Task.CompletedTask;
     }
@@ -871,7 +981,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     private sealed record AuthResponse(
         [property: JsonPropertyName("access_token")] string AccessToken,
         [property: JsonPropertyName("refresh_token")] string RefreshToken = "");
-    private sealed record CredentialCache(string PlayerId, string RefreshToken);
+    private sealed record CredentialCache(string PlayerId, string RefreshToken, string ServerOrigin = "");
     private sealed record ClockResponse([property: JsonPropertyName("server_unix_ms")] long ServerUnixMs);
     private sealed record QueueJoinResponse(string State, AssignmentDto? Assignment);
     private sealed record AssignmentDto(string MatchId, string GameId, string GameVersion, string Kind, int TeamSize, string FirstTeamId, string SecondTeamId,
