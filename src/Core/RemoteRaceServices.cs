@@ -684,7 +684,10 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                     case "match_cancelled":
                         CurrentMatch = null;
                         MatchChanged?.Invoke(null);
-                        SetQueue(new QueueSnapshot(QueueState.Idle, _queueRequest, _localTeam, Detail: "opponent_disconnected"));
+                        var cancellationReason = data.TryGetProperty("reason", out var reasonElement)
+                            ? reasonElement.GetString() ?? "opponent_disconnected"
+                            : "opponent_disconnected";
+                        SetQueue(new QueueSnapshot(QueueState.Idle, _queueRequest, _localTeam, Detail: cancellationReason));
                         break;
                     case "entertainment_room_updated": ApplyRoom(data.Deserialize<RoomDto>(Json)!); break;
                     case "entertainment_room_starting": ApplyRoom(data.Deserialize<RoomDto>(Json)!); break;
@@ -938,6 +941,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     {
         CurrentRoom = null;
         RoomChanged?.Invoke(null);
+        if (reason == "launch_failed")
+            SetQueue(new QueueSnapshot(QueueState.Idle, _queueRequest, _localTeam, Detail: reason));
         RoomExited?.Invoke(reason);
     }
     private void OnP2PMatchChanged(MatchAssignment? match)
@@ -1013,7 +1018,9 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         (profile.RecentMatches ?? Array.Empty<HistoryDto>()).Select(x => new MatchHistoryEntry(
             x.MatchId, ParseKind(x.Kind), (TeamSize)x.TeamSize, x.Victory,
             TimeSpan.FromMilliseconds(x.RunTimeMs), string.IsNullOrEmpty(x.Character) ? "Ironclad" : x.Character,
-            x.PlayedAt, x.RatingDelta)).ToArray(),
+            x.PlayedAt, x.RatingDelta, x.Completed, x.HighestFloor, TimeSpan.FromMilliseconds(x.OpponentRunTimeMs),
+            x.OpponentCompleted, x.OpponentHighestFloor, x.OpponentNames ?? Array.Empty<string>(),
+            x.OpponentCharacters ?? Array.Empty<string>())).ToArray(),
         local);
 
     private static QueueKind ParseKind(string value) => value switch { "ranked" => QueueKind.Ranked, "casual" => QueueKind.Casual, _ => QueueKind.Entertainment };
@@ -1063,7 +1070,9 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         string FirstSteamLobbyId, string SecondSteamLobbyId, long StartedAtMs = 0);
     private sealed record ProfileDto(string Id, string DisplayName, RatingDto Solo, RatingDto Team, string FavoriteCharacter = "Ironclad", long BestTimeMs = 0, double WinRate = 0, HistoryDto[]? RecentMatches = null);
     private sealed record RatingDto(string Tier, int Points, int Games, int HiddenRating, int Wins = 0, int Losses = 0, int Division = 4, int LeaderboardRank = 0);
-    private sealed record HistoryDto(string MatchId, string Kind, int TeamSize, bool Victory, long RunTimeMs, string Character, DateTimeOffset PlayedAt, int RatingDelta);
+    private sealed record HistoryDto(string MatchId, string Kind, int TeamSize, bool Victory, long RunTimeMs, string Character,
+        DateTimeOffset PlayedAt, int RatingDelta, bool Completed = false, int HighestFloor = 0, long OpponentRunTimeMs = 0,
+        bool OpponentCompleted = false, int OpponentHighestFloor = 0, string[]? OpponentNames = null, string[]? OpponentCharacters = null);
     private sealed record LeaderboardDto(int Position, string PlayerId, string DisplayName, string Tier, int Rating, int Wins, int Losses, long BestTimeMs = 0);
     private sealed record SocialDto(string PlayerId, string DisplayName, string Relationship, string Tier, bool Online, bool InRace);
     private sealed record RaceInviteDto(string PlayerId, string DisplayName, string RoomCode = "", string PartyId = "", string Kind = "casual", int TeamSize = 1);

@@ -319,7 +319,14 @@ public sealed record MatchHistoryEntry(
     TimeSpan RunTime,
     string Character,
     DateTimeOffset PlayedAt,
-    int RatingDelta);
+    int RatingDelta,
+    bool Completed = false,
+    int HighestFloor = 0,
+    TimeSpan OpponentRunTime = default,
+    bool OpponentCompleted = false,
+    int OpponentHighestFloor = 0,
+    IReadOnlyList<string>? OpponentNames = null,
+    IReadOnlyList<string>? OpponentCharacters = null);
 
 public sealed record PlayerProfile(
     string Id,

@@ -1,5 +1,6 @@
 using Godot;
 using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 
 namespace Sts2SpireRace.UI;
@@ -10,6 +11,7 @@ public sealed partial class RacePage : NSubmenu
     private readonly List<Action> _cleanup = [];
     private Control? _initialFocus;
     private Control? _backButton;
+    private bool _backAllowed = true;
     private string _title = string.Empty;
 
     public VBoxContainer Content { get; private set; } = null!;
@@ -63,6 +65,7 @@ public sealed partial class RacePage : NSubmenu
         AddChild(_backButton);
         _builder?.Invoke(this);
         ConnectSignals();
+        ApplyBackState();
     }
 
     public void SetInitialFocus(Control control)
@@ -74,8 +77,27 @@ public sealed partial class RacePage : NSubmenu
 
     public void SetBackVisible(bool visible)
     {
-        if (_backButton is not null && GodotObject.IsInstanceValid(_backButton))
-            _backButton.Visible = visible;
+        _backAllowed = visible;
+        ApplyBackState();
+    }
+
+    protected override void OnSubmenuShown()
+    {
+        base.OnSubmenuShown();
+        Callable.From(ApplyBackState).CallDeferred();
+    }
+
+    private void ApplyBackState()
+    {
+        if (_backButton is not NBackButton back || !GodotObject.IsInstanceValid(back))
+            return;
+        back.Visible = _backAllowed;
+        if (!back.IsNodeReady())
+            return;
+        if (_backAllowed)
+            back.Enable();
+        else
+            back.Disable();
     }
 
     public void ClearContent()

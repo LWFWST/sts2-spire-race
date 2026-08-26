@@ -99,6 +99,7 @@ func (s *Service) Create(ctx context.Context, first, second domain.QueueRequest)
 	if notifier != nil {
 		notifier.Broadcast(allPlayers(a), "match_found", a)
 	}
+	time.AfterFunc(domain.ReadyCheckWindow, func() { s.expireUnstarted(matchID) })
 	return a, nil
 }
 
@@ -529,6 +530,25 @@ func (s *Service) forfeitDisconnected(playerID string) {
 	matchID := st.Assignment.MatchID
 	s.mu.Unlock()
 	_ = s.trySettle(context.Background(), matchID)
+}
+
+func (s *Service) expireUnstarted(matchID string) {
+	s.mu.Lock()
+	st := s.matches[matchID]
+	if st == nil || st.Settled || st.Assignment.StartedAtMS != 0 {
+		s.mu.Unlock()
+		return
+	}
+	st.Settled = true
+	players := allPlayers(st.Assignment)
+	for _, player := range players {
+		delete(s.playerMatch, player)
+	}
+	notifier := s.notifier
+	s.mu.Unlock()
+	if notifier != nil {
+		notifier.Broadcast(players, "match_cancelled", map[string]any{"match_id": matchID, "reason": "connection_timeout"})
+	}
 }
 
 func (s *Service) trySettle(ctx context.Context, matchID string) error {

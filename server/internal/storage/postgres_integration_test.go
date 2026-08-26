@@ -88,14 +88,19 @@ func TestRankedSettlementPersistsProfileHistoryAndLeaderboard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 1 || !history[0].Victory || history[0].RatingDelta != 25 || history[0].RunTimeMS != winnerTime || history[0].Character != "Ironclad" {
+	if len(history) != 1 || !history[0].Victory || history[0].RatingDelta != 25 || history[0].RunTimeMS != winnerTime ||
+		!history[0].Completed || history[0].HighestFloor != 51 || history[0].OpponentCompleted || history[0].OpponentHighestFloor != 38 ||
+		len(history[0].OpponentNames) != 1 || history[0].OpponentNames[0] != "Integration Loser" || history[0].Character != "Ironclad" {
 		t.Fatalf("winner history mismatch: %+v", history)
 	}
 	loserHistory, err := store.History(ctx, loserID, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loserHistory) != 1 || loserHistory[0].Victory || loserHistory[0].RatingDelta != -20 || loserHistory[0].RunTimeMS != 1_900_000 {
+	if len(loserHistory) != 1 || loserHistory[0].Victory || loserHistory[0].RatingDelta != -20 || loserHistory[0].RunTimeMS != 1_900_000 ||
+		loserHistory[0].Completed || loserHistory[0].HighestFloor != 38 || !loserHistory[0].OpponentCompleted ||
+		loserHistory[0].OpponentRunTimeMS != winnerTime || loserHistory[0].OpponentHighestFloor != 51 ||
+		len(loserHistory[0].OpponentNames) != 1 || loserHistory[0].OpponentNames[0] != "Integration Winner" {
 		t.Fatalf("loser history mismatch: %+v", loserHistory)
 	}
 	best, err := store.BestTime(ctx, winnerID)

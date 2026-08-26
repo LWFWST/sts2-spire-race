@@ -5,6 +5,7 @@ import "time"
 const (
 	MaxMatchMilliseconds int64 = 180 * 60 * 1000
 	DisconnectGrace            = 10 * time.Second
+	ReadyCheckWindow           = 30 * time.Second
 	DeathDecisionWindow        = 60 * time.Second
 	LegendPickWindow           = 30 * time.Second
 )

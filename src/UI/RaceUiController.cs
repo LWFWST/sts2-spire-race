@@ -1,6 +1,7 @@
 using Godot;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using Sts2SpireRace.Core;
 using Sts2SpireRace.Game;
@@ -17,6 +18,8 @@ public sealed partial class RaceUiController : Node
     private LocManager.LocaleChangeCallback? _localeCallback;
     private Action<RaceInvite>? _inviteCallback;
     private Action<EntertainmentRoom?>? _roomCallback;
+    private Action<SettlementSnapshot>? _settlementCallback;
+    private string? _lastP2PJoinNoticeCode;
 
     public IRaceServices Services { get; private set; } = null!;
     public RaceRuleSet EntertainmentRules { get; set; } = RaceRules.EntertainmentDefault();
@@ -46,12 +49,33 @@ public sealed partial class RaceUiController : Node
             {
                 if (room is null || room.CoordinationMode != EntertainmentCoordinationMode.SteamP2P)
                     return;
+                var isNewRoom = CurrentEntertainmentRoom?.Code != room.Code;
                 CurrentEntertainmentRoom = room;
                 EntertainmentRules = room.Rules;
-                if (_mainMenu.SubmenuStack.Peek() is not RacePage)
+                if (isNewRoom && !string.IsNullOrWhiteSpace(LocalPlatformId) && room.HostPlayerId != LocalPlatformId &&
+                    _lastP2PJoinNoticeCode != room.Code)
+                {
+                    _lastP2PJoinNoticeCode = room.Code;
+                    OpenDetails(RaceTextCatalog.Get("invite.title"), RaceTextCatalog.Format("fun.p2p_joined_notice", room.Code));
+                }
+                else if (_mainMenu.SubmenuStack.Peek() is not RacePage)
                     OpenEntertainment();
             }).CallDeferred();
             rooms.RoomChanged += _roomCallback;
+        }
+        if (Services is IRaceMatchService matches)
+        {
+            _settlementCallback = settlement => Callable.From(() =>
+            {
+                if (NRun.Instance is not null)
+                    return;
+                var key = $"completed:{settlement.MatchId}";
+                if (_lastAutoOpenedSettlementKey == key)
+                    return;
+                _lastAutoOpenedSettlementKey = key;
+                OpenQueue();
+            }).CallDeferred();
+            matches.MatchSettled += _settlementCallback;
         }
         if (!_startupAuthenticationAttempted)
         {
@@ -112,6 +136,8 @@ public sealed partial class RaceUiController : Node
             Services.InviteReceived -= _inviteCallback;
         if (_roomCallback is not null && Services is IRaceEntertainmentRoomService rooms)
             rooms.RoomChanged -= _roomCallback;
+        if (_settlementCallback is not null && Services is IRaceMatchService matches)
+            matches.MatchSettled -= _settlementCallback;
     }
 
     public void OpenHub() => Open(RaceTextCatalog.Get("hub.title"), RaceScreens.BuildHub);
@@ -144,6 +170,13 @@ public sealed partial class RaceUiController : Node
     public void OpenTitles() => OpenComingSoon(RaceTextCatalog.Get("titles.title"), RaceTextCatalog.Get("coming_soon.titles"));
     public void OpenActivity() => OpenComingSoon(RaceTextCatalog.Get("activity.title"), RaceTextCatalog.Get("coming_soon.activity"));
     public void OpenSettings() => Open(RaceTextCatalog.Get("settings.title"), RaceScreens.BuildSettings);
+    public void NotifySteamInviteJoined(string roomCode)
+    {
+        if (_lastP2PJoinNoticeCode == roomCode)
+            return;
+        _lastP2PJoinNoticeCode = roomCode;
+        OpenDetails(RaceTextCatalog.Get("invite.title"), RaceTextCatalog.Format("fun.p2p_joined_notice", roomCode));
+    }
     private void OpenComingSoon(string title, string body) =>
         Open(title, page => RaceScreens.BuildComingSoon(page, body));
     public void OpenDetails(string title, params string[] paragraphs) =>
@@ -167,6 +200,14 @@ public sealed partial class RaceUiController : Node
         try
         {
             var identity = await Services.IdentityProvider.GetLocalIdentityAsync();
+            LocalPlatformId = identity.PlatformId.ToString();
+            if (Services is IRaceEntertainmentRoomService { CurrentRoom: { CoordinationMode: EntertainmentCoordinationMode.SteamP2P } p2pRoom } &&
+                p2pRoom.HostPlayerId != LocalPlatformId)
+            {
+                CurrentEntertainmentRoom = p2pRoom;
+                EntertainmentRules = p2pRoom.Rules;
+                Callable.From(() => NotifySteamInviteJoined(p2pRoom.Code)).CallDeferred();
+            }
             if (identity.PlatformId == 0 && !RaceRuntimeInfo.DevelopmentAuthentication)
                 throw new InvalidOperationException(RaceTextCatalog.Get("auth.steam_required"));
             if (Services.ConfiguredServerUri is null)

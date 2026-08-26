@@ -121,6 +121,29 @@ func TestSingleBossFinishWaitsForOpponent(t *testing.T) {
 	}
 }
 
+func TestUnstartedMatchExpiresAndAllowsBothPlayersToLeave(t *testing.T) {
+	notify := &fakeNotifier{}
+	service := New(&fakeRepository{}, notify)
+	a, err := service.Create(context.Background(),
+		request("a", domain.QueueCasual, 1, "Gold", "a"),
+		request("b", domain.QueueCasual, 1, "Gold", "b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.expireUnstarted(a.MatchID)
+	if _, ok := service.AssignmentFor("a"); ok {
+		t.Fatal("first player remained trapped in an expired ready check")
+	}
+	if _, ok := service.AssignmentFor("b"); ok {
+		t.Fatal("second player remained trapped in an expired ready check")
+	}
+	notify.mu.Lock()
+	defer notify.mu.Unlock()
+	if len(notify.events) < 2 || notify.events[len(notify.events)-1] != "match_cancelled" {
+		t.Fatalf("missing match_cancelled event: %v", notify.events)
+	}
+}
+
 func TestEntertainmentSettlementSkipsRatings(t *testing.T) {
 	repo, notify := &fakeRepository{}, &fakeNotifier{}
 	service := New(repo, notify)

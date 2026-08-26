@@ -108,23 +108,41 @@ func (p *Postgres) RatingProfile(ctx context.Context, playerID, pool string) (Ra
 }
 
 type HistoryEntry struct {
-	MatchID     string    `json:"match_id"`
-	Kind        string    `json:"kind"`
-	TeamSize    int       `json:"team_size"`
-	Victory     bool      `json:"victory"`
-	RunTimeMS   int64     `json:"run_time_ms"`
-	Character   string    `json:"character"`
-	PlayedAt    time.Time `json:"played_at"`
-	RatingDelta int       `json:"rating_delta"`
+	MatchID              string    `json:"match_id"`
+	Kind                 string    `json:"kind"`
+	TeamSize             int       `json:"team_size"`
+	Victory              bool      `json:"victory"`
+	RunTimeMS            int64     `json:"run_time_ms"`
+	Completed            bool      `json:"completed"`
+	HighestFloor         int       `json:"highest_floor"`
+	Character            string    `json:"character"`
+	OpponentRunTimeMS    int64     `json:"opponent_run_time_ms"`
+	OpponentCompleted    bool      `json:"opponent_completed"`
+	OpponentHighestFloor int       `json:"opponent_highest_floor"`
+	OpponentNames        []string  `json:"opponent_names"`
+	OpponentCharacters   []string  `json:"opponent_characters"`
+	PlayedAt             time.Time `json:"played_at"`
+	RatingDelta          int       `json:"rating_delta"`
 }
 
 func (p *Postgres) History(ctx context.Context, playerID string, limit int) ([]HistoryEntry, error) {
 	rows, err := p.Pool.Query(ctx, `SELECT m.id,m.kind,m.team_size,m.winner_team_id,m.completed_at,
 		COALESCE(m.settlement->'first'->>'team_id','') AS first_team,
-		COALESCE(NULLIF(m.settlement->'first'->>'completion_ms','null'),NULLIF(m.settlement->'first'->>'highest_floor_entered_ms','null')) AS first_ms,
+		COALESCE(m.settlement->'first'->>'outcome','') AS first_outcome,
+		COALESCE((m.settlement->'first'->>'highest_floor')::int,0) AS first_floor,
+		NULLIF(m.settlement->'first'->>'highest_floor_entered_ms','null') AS first_floor_ms,
+		NULLIF(m.settlement->'first'->>'completion_ms','null') AS first_completion_ms,
 		COALESCE(m.settlement->'second'->>'team_id','') AS second_team,
-		COALESCE(NULLIF(m.settlement->'second'->>'completion_ms','null'),NULLIF(m.settlement->'second'->>'highest_floor_entered_ms','null')) AS second_ms,
-		COALESCE(m.payload->'rules'->>'character_id','') AS character_id,
+		COALESCE(m.settlement->'second'->>'outcome','') AS second_outcome,
+		COALESCE((m.settlement->'second'->>'highest_floor')::int,0) AS second_floor,
+		NULLIF(m.settlement->'second'->>'highest_floor_entered_ms','null') AS second_floor_ms,
+		NULLIF(m.settlement->'second'->>'completion_ms','null') AS second_completion_ms,
+		COALESCE(m.payload->'character_ids'->>$1,m.payload->'rules'->>'character_id','') AS character_id,
+		ARRAY(SELECT COALESCE(NULLIF(p2.display_name,''),mp2.player_id)
+			FROM match_participants mp2 LEFT JOIN players p2 ON p2.id=mp2.player_id
+			WHERE mp2.match_id=m.id AND mp2.team_id<>mp.team_id ORDER BY mp2.player_id) AS opponent_names,
+		ARRAY(SELECT COALESCE(m.payload->'character_ids'->>mp2.player_id,m.payload->'rules'->>'character_id','')
+			FROM match_participants mp2 WHERE mp2.match_id=m.id AND mp2.team_id<>mp.team_id ORDER BY mp2.player_id) AS opponent_characters,
 		COALESCE(mp.rating_delta,0),
 		mp.team_id
 		FROM matches m JOIN match_participants mp ON mp.match_id=m.id
@@ -137,23 +155,28 @@ func (p *Postgres) History(ctx context.Context, playerID string, limit int) ([]H
 	result := []HistoryEntry{}
 	for rows.Next() {
 		var e HistoryEntry
-		var winnerTeamID, firstTeam, secondTeam string
-		var firstMs, secondMs *string
+		var winnerTeamID, firstTeam, secondTeam, firstOutcome, secondOutcome string
+		var firstFloor, secondFloor int
+		var firstFloorMs, firstCompletionMs, secondFloorMs, secondCompletionMs *string
 		var completedAt *time.Time
 		var playerTeam string
-		if err := rows.Scan(&e.MatchID, &e.Kind, &e.TeamSize, &winnerTeamID, &completedAt, &firstTeam, &firstMs,
-			&secondTeam, &secondMs, &e.Character, &e.RatingDelta, &playerTeam); err != nil {
+		if err := rows.Scan(&e.MatchID, &e.Kind, &e.TeamSize, &winnerTeamID, &completedAt,
+			&firstTeam, &firstOutcome, &firstFloor, &firstFloorMs, &firstCompletionMs,
+			&secondTeam, &secondOutcome, &secondFloor, &secondFloorMs, &secondCompletionMs,
+			&e.Character, &e.OpponentNames, &e.OpponentCharacters, &e.RatingDelta, &playerTeam); err != nil {
 			return nil, err
 		}
 		e.Victory = playerTeam == winnerTeamID && winnerTeamID != ""
-		if playerTeam == firstTeam && firstMs != nil {
-			if ms, parseErr := parseInt64(*firstMs); parseErr == nil {
-				e.RunTimeMS = ms
-			}
-		} else if playerTeam == secondTeam && secondMs != nil {
-			if ms, parseErr := parseInt64(*secondMs); parseErr == nil {
-				e.RunTimeMS = ms
-			}
+		if playerTeam == firstTeam {
+			e.Completed, e.HighestFloor = firstOutcome == string(domain.OutcomeFinished), firstFloor
+			e.OpponentCompleted, e.OpponentHighestFloor = secondOutcome == string(domain.OutcomeFinished), secondFloor
+			e.RunTimeMS = firstNonNullMilliseconds(firstCompletionMs, firstFloorMs)
+			e.OpponentRunTimeMS = firstNonNullMilliseconds(secondCompletionMs, secondFloorMs)
+		} else if playerTeam == secondTeam {
+			e.Completed, e.HighestFloor = secondOutcome == string(domain.OutcomeFinished), secondFloor
+			e.OpponentCompleted, e.OpponentHighestFloor = firstOutcome == string(domain.OutcomeFinished), firstFloor
+			e.RunTimeMS = firstNonNullMilliseconds(secondCompletionMs, secondFloorMs)
+			e.OpponentRunTimeMS = firstNonNullMilliseconds(firstCompletionMs, firstFloorMs)
 		}
 		if completedAt != nil {
 			e.PlayedAt = *completedAt
@@ -161,6 +184,17 @@ func (p *Postgres) History(ctx context.Context, playerID string, limit int) ([]H
 		result = append(result, e)
 	}
 	return result, rows.Err()
+}
+
+func firstNonNullMilliseconds(values ...*string) int64 {
+	for _, value := range values {
+		if value != nil {
+			if parsed, err := parseInt64(*value); err == nil {
+				return parsed
+			}
+		}
+	}
+	return 0
 }
 
 func (p *Postgres) BestTime(ctx context.Context, playerID string) (int64, error) {

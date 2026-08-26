@@ -5,10 +5,12 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Multiplayer.Transport.Steam;
+using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Platform;
 using MegaCrit.Sts2.Core.Platform.Steam;
 using Steamworks;
 using Sts2SpireRace.Core;
+using Sts2SpireRace.UI;
 
 namespace Sts2SpireRace.Game;
 
@@ -196,17 +198,37 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         return Task.FromResult(CurrentRoom!);
     }
 
-    public Task LeaveRoomAsync(CancellationToken cancellationToken = default)
+    public async Task LeaveRoomAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (_lobby is not null)
         {
-            if (IsLocalHost())
+            var state = GetLobby(StateKey);
+            if (state is "launching" or "preparing_team_lobbies" or "running")
+            {
+                if (CurrentMatch is not null)
+                {
+                    var localTeam = CurrentMatch.LocalTeam.Id.EndsWith("team2", StringComparison.Ordinal) ? 2 : 1;
+                    if (CanAdjudicate())
+                        SetForcedSettlement(localTeam, FinishReason.Disconnect);
+                    else
+                    {
+                        var checkpoint = (_localProgress ?? new ProgressCheckpoint(CurrentMatch.MatchId, CurrentMatch.GameId,
+                            CurrentMatch.LocalTeam.Id, 0, 0, 0, false, null, ParticipantOutcome.Active, 0, 0, 0)) with
+                        {
+                            Sequence = (_localProgress?.Sequence ?? 0) + 1,
+                            Outcome = ParticipantOutcome.Forfeited
+                        };
+                        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberProgressKey, JsonSerializer.Serialize(checkpoint, Json));
+                        await Task.Delay(250, cancellationToken);
+                    }
+                }
+            }
+            else if (IsLocalHost())
                 SteamMatchmaking.SetLobbyData(_lobby.Value, StateKey, "closed");
             SteamMatchmaking.LeaveLobby(_lobby.Value);
         }
         ClearLocal("left");
-        return Task.CompletedTask;
     }
 
     public Task ReportProgressAsync(ProgressCheckpoint checkpoint, string idempotencyKey, CancellationToken cancellationToken = default)
@@ -251,14 +273,6 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         if (_lobby?.m_SteamID != update.m_ulSteamIDLobby)
             return;
         RefreshFromSteam();
-        if (CurrentRoom is { State: not "waiting" and not "closed" } room)
-        {
-            var roster = ReadRoster();
-            var present = room.Members.Select(x => x.PlayerId).ToHashSet(StringComparer.Ordinal);
-            var missing = roster.FirstOrDefault(x => !present.Contains(x.PlayerId));
-            if (missing is not null && IsLocalHost())
-                SetForcedSettlement(missing.Team, FinishReason.Disconnect);
-        }
     }
 
     private void RefreshFromSteam()
@@ -266,15 +280,42 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         if (_lobby is null)
             return;
         var state = GetLobby(StateKey);
-        if (state == "closed" || !HostStillPresent())
+        if (state == "closed")
         {
             SteamMatchmaking.LeaveLobby(_lobby.Value);
             ClearLocal("host_closed");
             return;
         }
+        if (!HostStillPresent())
+        {
+            var roster = ReadRoster();
+            var present = ReadMembers().Select(x => x.PlayerId).ToHashSet(StringComparer.Ordinal);
+            var missingHost = roster.FirstOrDefault(x => x.PlayerId == GetLobby(HostKey) && !present.Contains(x.PlayerId));
+            if (missingHost is not null && state is not "waiting" && CanAdjudicate())
+            {
+                SetForcedSettlement(missingHost.Team, FinishReason.Disconnect);
+                state = GetLobby(StateKey);
+            }
+            else
+            {
+                SteamMatchmaking.LeaveLobby(_lobby.Value);
+                ClearLocal("host_closed");
+                return;
+            }
+        }
+        var currentMembers = ReadMembers();
+        if (state is not "waiting" and not "completed")
+        {
+            var present = currentMembers.Select(x => x.PlayerId).ToHashSet(StringComparer.Ordinal);
+            var missing = ReadRoster().FirstOrDefault(x => !present.Contains(x.PlayerId));
+            if (missing is not null && CanAdjudicate())
+            {
+                SetForcedSettlement(missing.Team, FinishReason.Disconnect);
+                state = GetLobby(StateKey);
+            }
+        }
         var rules = ReadRules();
-        var members = ReadMembers();
-        CurrentRoom = new EntertainmentRoom(RoomCode(_lobby.Value.m_SteamID), GetLobby(HostKey), rules, members,
+        CurrentRoom = new EntertainmentRoom(RoomCode(_lobby.Value.m_SteamID), GetLobby(HostKey), rules, currentMembers,
             DateTimeOffset.UtcNow, EntertainmentCoordinationMode.SteamP2P, state);
         RoomChanged?.Invoke(CurrentRoom);
 
@@ -287,12 +328,14 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
             if (IsLocalHost())
                 TryLaunchPreparedTeams();
         }
-        if (state == "launching")
+        // Steam may coalesce lobby-data updates. A guest can observe "running"
+        // without ever observing the short-lived "launching" value.
+        if (state is "launching" or "running" && CurrentMatch is null)
             _ = LaunchLocalRaceAsync();
         var settlement = GetLobby(SettlementKey);
         if (!string.IsNullOrWhiteSpace(settlement) && settlement != _appliedSettlement)
             ApplySettlement(settlement);
-        if (IsLocalHost() && state is "running" or "launching")
+        if (CanAdjudicate() && state is "running" or "launching")
             TrySettleFromProgress();
     }
 
@@ -361,6 +404,9 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         {
             _launching = false;
             Log.Error($"[SpireRace] Failed to launch a competitive Steam P2P race: {exception}");
+            if (_lobby is { } lobby)
+                SteamMatchmaking.LeaveLobby(lobby);
+            ClearLocal("launch_failed");
         }
     }
 
@@ -530,6 +576,8 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
     private EntertainmentRoomMember LocalMember() => CurrentRoom?.Members.FirstOrDefault(x => x.PlayerId == SteamUser.GetSteamID().m_SteamID.ToString())
         ?? throw new InvalidOperationException("The local player is not in the Steam race lobby.");
     private bool IsLocalHost() => _lobby is not null && GetLobby(HostKey) == SteamUser.GetSteamID().m_SteamID.ToString();
+    private bool CanAdjudicate() => _lobby is not null &&
+        (IsLocalHost() || SteamMatchmaking.GetLobbyOwner(_lobby.Value) == SteamUser.GetSteamID());
     private bool HostStillPresent() => _lobby is not null && ReadMembers().Any(x => x.PlayerId == GetLobby(HostKey));
     private void RequireHost() { if (!IsLocalHost()) throw new InvalidOperationException(RaceTextCatalog.Get("fun.host_only")); }
     private void RequireWaitingRoom() { if (CurrentRoom is null || CurrentRoom.State != "waiting") throw new InvalidOperationException("The Steam race room is no longer waiting."); }
@@ -601,7 +649,12 @@ internal static class SteamP2PRaceInviteRouter
         if (SteamP2PRaceCoordinator.IsRaceLobby(lobbyId) &&
             RaceServiceRegistry.Services.SessionLauncher is RaceSessionLauncher launcher)
         {
-            await launcher.P2P.JoinInvitedLobbyAsync(lobbyId);
+            if (await launcher.P2P.JoinInvitedLobbyAsync(lobbyId))
+            {
+                var controller = NGame.Instance?.MainMenu?.GetNodeOrNull<RaceUiController>("SpireRaceController");
+                if (controller is not null)
+                    Callable.From(() => controller.NotifySteamInviteJoined(RoomCode(lobbyId))).CallDeferred();
+            }
             return;
         }
 
@@ -625,5 +678,11 @@ internal static class SteamP2PRaceInviteRouter
             return;
         try { await completion.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
         catch (TimeoutException) { }
+    }
+
+    private static string RoomCode(ulong lobbyId)
+    {
+        var value = lobbyId.ToString();
+        return value.Length <= 6 ? value : value[^6..];
     }
 }

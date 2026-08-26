@@ -98,10 +98,10 @@ internal static class RaceAbandonConfirmPatch
 
     private static async Task SurrenderAndReturnAsync(IRaceMatchService matches)
     {
-        await matches.VoteSurrenderAsync(true);
-        RaceActiveSession.Clear();
-        if (NGame.Instance is not null)
-            await NGame.Instance.ReturnToMainMenu();
+        var match = matches.CurrentMatch ?? RaceActiveSession.Current;
+        var settlement = await RaceSettlementWaiter.SurrenderAndWaitAsync(matches);
+        if (settlement is not null)
+            Callable.From(() => RaceSettlementOverlay.Show(matches, settlement, match)).CallDeferred();
     }
 }
 
@@ -143,12 +143,39 @@ public sealed partial class RaceSurrenderOverlay : Control
     {
         var match = _matches.CurrentMatch ?? RaceActiveSession.Current;
         var teamSize = match?.TeamSize ?? TeamSize.One;
-        await _matches.VoteSurrenderAsync(true);
-        QueueFree();
         if (teamSize == TeamSize.One)
         {
-            RaceActiveSession.Clear();
-            await NGame.Instance!.ReturnToMainMenu();
+            var settlement = await RaceSettlementWaiter.SurrenderAndWaitAsync(_matches);
+            QueueFree();
+            if (settlement is not null)
+                Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement, match)).CallDeferred();
+            return;
+        }
+        await _matches.VoteSurrenderAsync(true);
+        QueueFree();
+    }
+}
+
+internal static class RaceSettlementWaiter
+{
+    public static async Task<SettlementSnapshot?> SurrenderAndWaitAsync(IRaceMatchService matches)
+    {
+        if (matches.CurrentSettlement is { } existing)
+            return existing;
+        var completion = new TaskCompletionSource<SettlementSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Settled(SettlementSnapshot value) => completion.TrySetResult(value);
+        matches.MatchSettled += Settled;
+        try
+        {
+            await matches.VoteSurrenderAsync(true);
+            if (matches.CurrentSettlement is { } immediate)
+                return immediate;
+            try { return await completion.Task.WaitAsync(TimeSpan.FromSeconds(8)); }
+            catch (TimeoutException) { return matches.CurrentSettlement; }
+        }
+        finally
+        {
+            matches.MatchSettled -= Settled;
         }
     }
 }

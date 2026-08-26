@@ -116,18 +116,23 @@ public sealed partial class RaceRunIntegration : Node
             return;
         }
         if (_state.IsGameOver && !_deathShown)
-        {
-            _deathShown = true;
-            var overlay = new RaceDeathChoiceOverlay { Name = "SpireRaceDeathChoice", ZIndex = 1000 };
-            overlay.Configure(this, RaceRules.DeathDecisionSeconds);
-            NRun.Instance!.GlobalUi.AddChild(overlay);
-            overlay.Build();
-        }
+            ShowDeathChoice();
+    }
+
+    internal void ShowDeathChoice()
+    {
+        if (_deathShown || _finishedReported || !IsInsideTree() || NRun.Instance?.GlobalUi is null)
+            return;
+        _deathShown = true;
+        var overlay = new RaceDeathChoiceOverlay { Name = "SpireRaceDeathChoice", ZIndex = 1000 };
+        overlay.Configure(this, RaceRules.DeathDecisionSeconds);
+        NRun.Instance.GlobalUi.AddChild(overlay);
+        overlay.Build();
     }
 
     private void OnMatchSettled(SettlementSnapshot settlement)
     {
-        Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement)).CallDeferred();
+        Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement, _match)).CallDeferred();
     }
 
     public async Task KeepScoreAsync()
@@ -191,6 +196,20 @@ public sealed partial class RaceRunIntegration : Node
             return Math.Max(0, snapshot.ElapsedMilliseconds +
                 (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - snapshot.ServerUnixMilliseconds));
         return RunManager.Instance.RunTime * 1000;
+    }
+}
+
+[HarmonyPatch(typeof(NRun), nameof(NRun.ShowGameOverScreen))]
+internal static class RaceGameOverScreenPatch
+{
+    [HarmonyPostfix]
+    private static void Postfix(NRun __instance)
+    {
+        if (RaceActiveSession.Current is null)
+            return;
+        var integration = __instance.GetNodeOrNull<RaceRunIntegration>("SpireRaceRunIntegration");
+        if (integration is not null)
+            Callable.From(integration.ShowDeathChoice).CallDeferred();
     }
 }
 

@@ -306,6 +306,8 @@ public static class RaceScreens
                     "cancelled" or "" => RaceTextCatalog.Get("queue.cancelled"),
                     "connection_lost" => RaceTextCatalog.Get("queue.connection_lost"),
                     "opponent_disconnected" => RaceTextCatalog.Get("queue.opponent_disconnected"),
+                    "connection_timeout" => RaceTextCatalog.Get("queue.connection_timeout"),
+                    "launch_failed" => RaceTextCatalog.Get("queue.launch_failed"),
                     _ => RaceTextCatalog.Format("queue.failed", snapshot.Detail)
                 };
                 BuildCenteredState(page,
@@ -944,13 +946,20 @@ public static class RaceScreens
             var list = ScrollList(page.Content);
             foreach (var match in profile.RecentMatches)
             {
-                var line = $"{match.PlayedAt:MM-dd HH:mm}   {(match.Victory ? "WIN" : "LOSS"),-5}   {(int)match.TeamSize}v{(int)match.TeamSize}   {CharacterName(match.Character),-12}   {RaceUiAssets.FormatTime(match.RunTime)}   {match.RatingDelta:+#;-#;0}";
+                var line = $"{match.PlayedAt:MM-dd HH:mm}   {(match.Victory ? "WIN" : "LOSS"),-5}   {(int)match.TeamSize}v{(int)match.TeamSize}   {CharacterName(match.Character),-12}   {HistoryProgress(match.Completed, match.HighestFloor, match.RunTime)}   {match.RatingDelta:+#;-#;0}";
                 list.AddChild(RaceUiAssets.Button(line, () => page.Controller.OpenDetails(
                     RaceTextCatalog.Get("profile.match_detail"),
                     $"ID  {match.MatchId}",
                     $"{(match.Victory ? "WIN" : "LOSS")}   ·   {(int)match.TeamSize}v{(int)match.TeamSize}",
-                    $"{CharacterName(match.Character)}   ·   {RaceUiAssets.FormatTime(match.RunTime)}",
-                    $"SEED  DEMO-{match.MatchId.ToUpperInvariant()}",
+                    RaceTextCatalog.Format("profile.history.local", CharacterName(match.Character),
+                        HistoryProgress(match.Completed, match.HighestFloor, match.RunTime)),
+                    RaceTextCatalog.Format("profile.history.opponents",
+                        match.OpponentNames is { Count: > 0 } ? string.Join(" / ", match.OpponentNames) : RaceTextCatalog.Get("profile.history.unknown"),
+                        match.OpponentCharacters is { Count: > 0 }
+                            ? string.Join(" / ", match.OpponentCharacters.Select(CharacterName))
+                            : RaceTextCatalog.Get("profile.history.unknown")),
+                    RaceTextCatalog.Format("profile.history.enemy_progress",
+                        HistoryProgress(match.OpponentCompleted, match.OpponentHighestFloor, match.OpponentRunTime)),
                     RaceTextCatalog.Format("result.rating", match.RatingDelta)), 19, new Vector2(0, 52)));
             }
             if (profile.RecentMatches.Count == 0)
@@ -1797,6 +1806,15 @@ public static class RaceScreens
             value = value.Replace("Season Mark", "赛季印记").Replace("Rank Banner", "排位旗帜").Replace("Title Seal", "称号纹章").Replace("Spire Crown", "尖塔王冠");
         return value;
     }
+    private static string HistoryProgress(bool completed, int highestFloor, TimeSpan elapsed)
+    {
+        if (!completed && highestFloor <= 0 && elapsed == TimeSpan.Zero)
+            return RaceTextCatalog.Get("profile.history.unknown");
+        if (completed)
+            return RaceTextCatalog.Format("profile.history.completed", RaceUiAssets.FormatTime(elapsed));
+        return RaceTextCatalog.Format("profile.history.floor", highestFloor, RaceUiAssets.FormatTime(elapsed));
+    }
+
     private static string CharacterName(string id) => RaceTextCatalog.CurrentLanguage == "zhs" ? id switch
     {
         "Ironclad" => "铁甲战士", "Silent" => "静默猎手", "Defect" => "故障机器人", "Necrobinder" => "亡灵契约师", "Regent" => "储君", _ => id

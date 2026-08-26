@@ -61,7 +61,7 @@ func New(tokens *auth.Manager, steam auth.SteamVerifier, store *storage.Postgres
 		roomLobbies: map[string]map[int]string{},
 	}
 	s.Matches = match.New(store, nil)
-	s.Hub = realtime.NewHub(s.Matches.Disconnected)
+	s.Hub = realtime.NewHub(s.onDisconnect)
 	s.Matches.SetNotifier(s.Hub)
 	s.routes()
 	return s
@@ -267,20 +267,38 @@ func (s *Server) joinQueue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
+	s.removeQueuedPlayer(group.First.PlayerID)
+	s.removeQueuedPlayer(group.Second.PlayerID)
 	writeJSON(w, http.StatusOK, map[string]any{"state": "match_found", "assignment": assignment})
 }
 func (s *Server) cancelQueue(w http.ResponseWriter, r *http.Request) {
 	claims, _ := auth.FromContext(r.Context())
-	s.queueMu.Lock()
-	req, ok := s.queueByPlayer[claims.PlayerID]
-	if ok {
-		delete(s.queueByPlayer, claims.PlayerID)
-	}
-	s.queueMu.Unlock()
+	req, ok := s.removeQueuedPlayer(claims.PlayerID)
 	if ok {
 		_ = s.Queue.Cancel(r.Context(), req)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"state": "idle"})
+}
+
+func (s *Server) removeQueuedPlayer(playerID string) (domain.QueueRequest, bool) {
+	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+	req, ok := s.queueByPlayer[playerID]
+	if ok {
+		delete(s.queueByPlayer, playerID)
+	}
+	return req, ok
+}
+
+func (s *Server) onDisconnect(playerID string) {
+	s.Matches.Disconnected(playerID)
+	if req, ok := s.removeQueuedPlayer(playerID); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.Queue.Cancel(ctx, req); err != nil {
+			slog.Warn("failed to remove disconnected player from matchmaking queue", "player_id", playerID, "error", err)
+		}
+	}
 }
 func (s *Server) confirmMatch(w http.ResponseWriter, r *http.Request) {
 	claims, _ := auth.FromContext(r.Context())
