@@ -25,6 +25,23 @@ For local backend development, run `docker compose up --build`. Production uses 
 
 For a production upload from Windows, prepare the shared production environment file and run `tools/deploy-server.ps1`. The wrapper uploads a versioned source archive and TLS files, then invokes `deploy/deploy-server.sh` on Ubuntu. The server script backs up a running PostgreSQL database, disables legacy systemd race services, starts the fixed `spire-race` Compose project, and changes the `current` symlink only after the health check passes. Password authentication is prompted interactively and is never stored by the script.
 
+Production maintenance helpers keep credentials outside Git. `tools/update-steam-allowlist.ps1` validates SteamID64 values and supports additive, removal, or full replacement updates; pass `-ApplyRemote` to recreate only the Go server container. `tools/update-integrity-hashes.ps1` hashes the selected retail build and Mod files, signs the result using `TOKEN_SECRET` from the production environment file, rejects a mismatched game version, and optionally performs the normal production deployment with `-Deploy`. Both scripts avoid printing IDs, tokens, or environment contents.
+
+```powershell
+# Add one or more testers, then atomically update only the production server container.
+.\tools\update-steam-allowlist.ps1 `
+  -ProductionEnvFile C:\secure\spire-race-production.env `
+  -SteamId 76561198000000001,76561198000000002 `
+  -Mode Add -ApplyRemote `
+  -ServerHost 134.122.116.15 -SshKeyPath C:\secure\server_ed25519
+
+# Build the Mod, sign the exact retail/Mod hashes, and run the normal production deployment.
+.\tools\update-integrity-hashes.ps1 `
+  -ProductionEnvFile C:\secure\spire-race-production.env `
+  -GameVersion v0.111.0 -BuildMod -Deploy `
+  -ServerHost 134.122.116.15 -SshKeyPath C:\secure\server_ed25519
+```
+
 Official access requires a valid Steam session ticket and an allowlisted SteamID. Self-hosted instances can disable official mode. Credentials, Steam tickets, TLS keys, integrity secrets, and game files are intentionally excluded from this repository.
 
 ## Development checks
