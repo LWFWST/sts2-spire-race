@@ -98,10 +98,14 @@ internal static class RaceAbandonConfirmPatch
 
     private static async Task SurrenderAndReturnAsync(IRaceMatchService matches)
     {
-        var match = matches.CurrentMatch ?? RaceActiveSession.Current;
+        if ((matches.CurrentMatch ?? RaceActiveSession.Current)?.Rules.BestOf == 3)
+        {
+            await matches.VoteSurrenderAsync(true);
+            return;
+        }
         var settlement = await RaceSettlementWaiter.SurrenderAndWaitAsync(matches);
         if (settlement is not null)
-            Callable.From(() => RaceSettlementOverlay.Show(matches, settlement, match)).CallDeferred();
+            Callable.From(() => RaceSettlementOverlay.Show(matches, settlement)).CallDeferred();
     }
 }
 
@@ -145,10 +149,16 @@ public sealed partial class RaceSurrenderOverlay : Control
         var teamSize = match?.TeamSize ?? TeamSize.One;
         if (teamSize == TeamSize.One)
         {
+            if (match?.Rules.BestOf == 3)
+            {
+                await _matches.VoteSurrenderAsync(true);
+                QueueFree();
+                return;
+            }
             var settlement = await RaceSettlementWaiter.SurrenderAndWaitAsync(_matches);
             QueueFree();
             if (settlement is not null)
-                Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement, match)).CallDeferred();
+                Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement)).CallDeferred();
             return;
         }
         await _matches.VoteSurrenderAsync(true);

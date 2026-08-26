@@ -60,6 +60,7 @@ type Rules struct {
 	AllowSpectators          bool     `json:"allow_spectators,omitempty"`
 	Visibility               string   `json:"visibility,omitempty"`
 	CoordinationMode         string   `json:"coordination_mode,omitempty"`
+	BestOf                   int      `json:"best_of,omitempty"`
 }
 
 type Progress struct {

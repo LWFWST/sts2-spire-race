@@ -550,7 +550,8 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	if rules.TeamSize < 1 || rules.TeamSize > 4 || rules.Ascension < 0 || rules.Ascension > 10 ||
 		rules.TimeLimitMS <= 0 || rules.TimeLimitMS > domain.MaxMatchMilliseconds ||
-		rules.EventSLLimit < 0 || rules.EventSLLimit > 9 || rules.CombatSLLimit < 0 || rules.CombatSLLimit > 9 {
+		rules.EventSLLimit < 0 || rules.EventSLLimit > 9 || rules.CombatSLLimit < 0 || rules.CombatSLLimit > 9 ||
+		(rules.BestOf != 0 && rules.BestOf != 1 && rules.BestOf != 3) {
 		writeError(w, 400, "invalid entertainment rules")
 		return
 	}
@@ -596,7 +597,8 @@ func (s *Server) updateRoomRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rules.TeamSize < 1 || rules.TeamSize > 4 || rules.Ascension < 0 || rules.Ascension > 10 ||
-		rules.EventSLLimit < 0 || rules.EventSLLimit > 9 || rules.CombatSLLimit < 0 || rules.CombatSLLimit > 9 {
+		rules.EventSLLimit < 0 || rules.EventSLLimit > 9 || rules.CombatSLLimit < 0 || rules.CombatSLLimit > 9 ||
+		(rules.BestOf != 0 && rules.BestOf != 1 && rules.BestOf != 3) {
 		writeError(w, 400, "invalid entertainment rules")
 		return
 	}
@@ -679,6 +681,9 @@ func (s *Server) startRoom(w http.ResponseWriter, r *http.Request) {
 		FirstPlayerIDs: firstPlayers, SecondPlayerIDs: secondPlayers, Rules: room.Rules, SessionNonce: room.Code,
 		StartedAtMS: time.Now().UnixMilli(), CharacterIDs: characters,
 		FirstSteamHostPlayerID: hosts[1], SecondSteamHostPlayerID: hosts[2],
+	}
+	if assignment.TeamSize == 1 && len(firstPlayers) > 0 {
+		assignment.Rules.CharacterID = characters[firstPlayers[0]]
 	}
 	if assignment.GameVersion == "" {
 		assignment.GameVersion = "unknown"

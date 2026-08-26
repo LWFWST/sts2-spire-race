@@ -19,6 +19,7 @@ public sealed partial class RaceUiController : Node
     private Action<RaceInvite>? _inviteCallback;
     private Action<EntertainmentRoom?>? _roomCallback;
     private Action<SettlementSnapshot>? _settlementCallback;
+    private Action<QueueSnapshot>? _queueCallback;
     private string? _lastP2PJoinNoticeCode;
 
     public IRaceServices Services { get; private set; } = null!;
@@ -77,6 +78,17 @@ public sealed partial class RaceUiController : Node
             }).CallDeferred();
             matches.MatchSettled += _settlementCallback;
         }
+        _queueCallback = snapshot =>
+        {
+            if (snapshot.State != QueueState.Draft || NRun.Instance is not null)
+                return;
+            Callable.From(() =>
+            {
+                if (_mainMenu.SubmenuStack.Peek() is not RacePage)
+                    OpenQueue();
+            }).CallDeferred();
+        };
+        Services.QueueChanged += _queueCallback;
         if (!_startupAuthenticationAttempted)
         {
             _startupAuthenticationAttempted = true;
@@ -138,6 +150,8 @@ public sealed partial class RaceUiController : Node
             rooms.RoomChanged -= _roomCallback;
         if (_settlementCallback is not null && Services is IRaceMatchService matches)
             matches.MatchSettled -= _settlementCallback;
+        if (_queueCallback is not null)
+            Services.QueueChanged -= _queueCallback;
     }
 
     public void OpenHub() => Open(RaceTextCatalog.Get("hub.title"), RaceScreens.BuildHub);

@@ -676,6 +676,10 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                         }
                         break;
                     case "settlement": ApplySettlement(data.Deserialize<SettlementDto>(Json)!); break;
+                    case "legend_game_settled":
+                    case "series_game_settled":
+                        await RaceSeriesTransition.PrepareNextGameAsync();
+                        break;
                     case "finish_pending":
                         _localFinishPending = data.TryGetProperty("completed_at_ms", out var completedAt) && completedAt.ValueKind == JsonValueKind.Number
                             ? completedAt.GetInt64() : null;
@@ -763,7 +767,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         var opponentIds = localFirst ? dto.SecondPlayerIds : dto.FirstPlayerIds;
         _localTeam = BuildTeam(localFirst ? dto.FirstTeamId : dto.SecondTeamId, "Blue", localIds, identityId, dto.Rules.CharacterId, dto.CharacterIds);
         _opponentTeam = BuildTeam(localFirst ? dto.SecondTeamId : dto.FirstTeamId, "Red", opponentIds, string.Empty, dto.Rules.CharacterId, dto.CharacterIds);
-        var kind = dto.Kind == "ranked" ? QueueKind.Ranked : QueueKind.Casual;
+        var kind = dto.Kind switch { "ranked" => QueueKind.Ranked, "entertainment" => QueueKind.Entertainment, _ => QueueKind.Casual };
         var rules = FromServerRules(dto.Rules);
         _queueRequest ??= new QueueRequest(kind, (TeamSize)dto.TeamSize, RaceRules.PoolFor((TeamSize)dto.TeamSize), rules);
         CurrentMatch = new MatchAssignment(dto.MatchId, dto.GameId, dto.GameVersion, kind, (TeamSize)dto.TeamSize, rules,
@@ -916,12 +920,12 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         string.IsNullOrEmpty(x.TimerKind) ? "server_time" : x.TimerKind, (int)(x.TimeLimitMs / 60000),
         string.IsNullOrEmpty(x.VictoryRule) ? "certified_race" : x.VictoryRule, x.AllowSpectators,
         string.IsNullOrEmpty(x.Visibility) ? "matchmade" : x.Visibility, x.Modifiers, x.EventSlLimit, x.CombatSlLimit,
-        string.IsNullOrEmpty(x.CoordinationMode) ? "server" : x.CoordinationMode);
+        string.IsNullOrEmpty(x.CoordinationMode) ? "server" : x.CoordinationMode, x.BestOf is 3 ? 3 : 1);
     private static object ToServerRules(RaceRuleSet x) => new { team_size = (int)x.TeamSize, seed = x.Seed, ascension = x.Ascension,
         time_limit_ms = x.TimeLimitMinutes * 60_000L, event_sl_limit = x.EventSlLimit, combat_sl_limit = x.CombatSlLimit,
         character_id = "", modifiers = x.Modifiers, random_seed = x.RandomSeed, allow_duplicate_characters = x.AllowDuplicateCharacters,
         character_policy = x.CharacterPolicy, timer_kind = x.TimerKind, victory_rule = x.VictoryRule,
-        allow_spectators = false, visibility = x.Visibility, coordination_mode = x.CoordinationMode };
+        allow_spectators = false, visibility = x.Visibility, coordination_mode = x.CoordinationMode, best_of = x.BestOf };
     private EntertainmentRoom ApplyRoom(RoomDto x)
     {
         var room = new EntertainmentRoom(x.Code, x.HostPlayerId, FromServerRules(x.Rules),
@@ -1058,7 +1062,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         string FirstSteamLobbyId = "", string SecondSteamLobbyId = "");
     private sealed record ServerRulesDto(int TeamSize, string Seed, int Ascension, long TimeLimitMs, int EventSlLimit, int CombatSlLimit, string CharacterId,
         string[] Modifiers, bool RandomSeed = false, bool AllowDuplicateCharacters = true, string CharacterPolicy = "", string TimerKind = "",
-        string VictoryRule = "", bool AllowSpectators = false, string Visibility = "", string CoordinationMode = "server");
+        string VictoryRule = "", bool AllowSpectators = false, string Visibility = "", string CoordinationMode = "server", int BestOf = 1);
     private sealed record IntegrityManifestDto(string GameVersion, string ManifestVersion, IntegrityFileDto[] GameFiles, IntegrityFileDto[] AllowedModFiles, string[] AllowedModIds, string Signature);
     private sealed record IntegrityFileDto(string Path, string Sha256, long Size);
     private sealed record IntegrityVerdictDto(bool Accepted, string Code, string Detail);

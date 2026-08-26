@@ -414,15 +414,22 @@ public static class RaceScreens
             page.Content.AddChild(RaceUiAssets.Label(RaceTextCatalog.Format("result.rating", result.RatingDelta), 26, StsColors.gold, HorizontalAlignment.Center));
         if (result.Settlement is { SeriesGames.Count: > 0 } series)
         {
+            var localWins = series.SeriesGames.Count(x => x.WinnerTeamId == series.Local.TeamId);
+            var opponentWins = series.SeriesGames.Count - localWins;
             var line = string.Join("     ", series.SeriesGames.Select(x =>
-                $"G{x.GameNumber} {CharacterName(x.CharacterId)}  {RaceRules.FormatElapsed(x.ElapsedMilliseconds)}"));
-            page.Content.AddChild(RaceUiAssets.Label(line, 19, StsColors.cream, HorizontalAlignment.Center));
+                $"G{x.GameNumber} {(x.WinnerTeamId == series.Local.TeamId ? RaceTextCatalog.Get("result.local_side") : RaceTextCatalog.Get("result.opponent_side"))}" +
+                (string.IsNullOrWhiteSpace(x.CharacterId) ? string.Empty : $"  {CharacterName(x.CharacterId)}") +
+                $"  {RaceRules.FormatElapsed(x.ElapsedMilliseconds)}"));
+            page.Content.AddChild(RaceUiAssets.Label($"BO3  {localWins} : {opponentWins}     {line}", 19, StsColors.cream, HorizontalAlignment.Center));
         }
         var actions = ActionRow();
         var again = RaceUiAssets.Button(RaceTextCatalog.Get("result.rematch"), () =>
         {
             _ = page.Controller.Services.CancelQueueAsync();
-            page.Controller.OpenModeSelection(result.LocalTeam.Participants.Count == 1 ? QueueKind.Ranked : QueueKind.Casual);
+            if (page.Controller.Services.CurrentQueue.Request?.Kind == QueueKind.Entertainment)
+                page.Controller.OpenEntertainment();
+            else
+                page.Controller.OpenModeSelection(result.LocalTeam.Participants.Count == 1 ? QueueKind.Ranked : QueueKind.Casual);
         });
         actions.AddChild(again);
         page.Content.AddChild(actions);
@@ -682,6 +689,10 @@ public static class RaceScreens
             Apply(rules with { CombatSlLimit = (rules.CombatSlLimit + 1) % 10 });
         }, page);
         AddOption(root, RaceTextCatalog.Get("fun.victory_rule"), RaceTextCatalog.Get("fun.shared_time"), () => { }, page);
+        AddOption(root, RaceTextCatalog.Get("fun.series_length"), RaceTextCatalog.Get(rules.BestOf == 3 ? "fun.bo3" : "fun.bo1"), () =>
+        {
+            Apply(rules with { BestOf = rules.BestOf == 3 ? 1 : 3 });
+        }, page);
 
         AddRulesSection(root, RaceTextCatalog.Get("fun.section.access"));
         AddOption(root, RaceTextCatalog.Get("fun.visibility"), RaceTextCatalog.Get($"fun.{rules.Visibility}"), () =>

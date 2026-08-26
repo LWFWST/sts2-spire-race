@@ -132,7 +132,7 @@ public sealed partial class RaceRunIntegration : Node
 
     private void OnMatchSettled(SettlementSnapshot settlement)
     {
-        Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement, _match)).CallDeferred();
+        Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement)).CallDeferred();
     }
 
     public async Task KeepScoreAsync()
@@ -382,24 +382,21 @@ public sealed partial class RaceSettlementOverlay : Control
     private SettlementSnapshot _settlement = null!;
     private bool _built;
 
-    public static void Show(IRaceMatchService matches, SettlementSnapshot settlement, MatchAssignment? match = null)
+    public static void Show(IRaceMatchService matches, SettlementSnapshot settlement)
     {
         var globalUi = NRun.Instance?.GlobalUi;
         if (globalUi is null || globalUi.GetNodeOrNull<Node>("SpireRaceSettlement") is not null)
             return;
         var overlay = new RaceSettlementOverlay { Name = "SpireRaceSettlement", ZIndex = 1000 };
-        overlay.Configure(matches, settlement, match);
+        overlay.Configure(matches, settlement);
         globalUi.AddChild(overlay);
         overlay.Build();
     }
 
-    private MatchAssignment? _match;
-
-    public void Configure(IRaceMatchService matches, SettlementSnapshot settlement, MatchAssignment? match = null)
+    public void Configure(IRaceMatchService matches, SettlementSnapshot settlement)
     {
         _matches = matches;
         _settlement = settlement;
-        _match = match;
     }
 
     public override void _Ready() => Build();
@@ -414,8 +411,7 @@ public sealed partial class RaceSettlementOverlay : Control
         var shade = new ColorRect { Color = new Color(0, 0, 0, 0.75f), MouseFilter = MouseFilterEnum.Stop };
         shade.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
         AddChild(shade);
-        var teamMatch = _match ?? _matches.CurrentMatch;
-        var victory = teamMatch is not null && _settlement.WinnerTeamId == teamMatch.LocalTeam.Id;
+        var victory = _settlement.WinnerTeamId == _settlement.Local.TeamId;
         var panel = RaceUiAssets.Panel(new Color("223c43"), 18);
         panel.SetAnchorsPreset(LayoutPreset.Center);
         panel.Position = new Vector2(-380, -220);
@@ -440,6 +436,14 @@ public sealed partial class RaceSettlementOverlay : Control
         if (_settlement.VisibleRatingDelta != 0)
             content.AddChild(RaceUiAssets.Label(
                 RaceTextCatalog.Format("result.rating", _settlement.VisibleRatingDelta), 22, StsColors.gold, HorizontalAlignment.Center));
+        if (_settlement.SeriesGames.Count > 0)
+        {
+            var localWins = _settlement.SeriesGames.Count(x => x.WinnerTeamId == _settlement.Local.TeamId);
+            var opponentWins = _settlement.SeriesGames.Count - localWins;
+            var games = string.Join("     ", _settlement.SeriesGames.Select(x =>
+                $"G{x.GameNumber} {(x.WinnerTeamId == _settlement.Local.TeamId ? RaceTextCatalog.Get("result.local_side") : RaceTextCatalog.Get("result.opponent_side"))}"));
+            content.AddChild(RaceUiAssets.Label($"BO3  {localWins} : {opponentWins}     {games}", 18, StsColors.cream, HorizontalAlignment.Center));
+        }
         var actions = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
         actions.AddThemeConstantOverride("separation", 20);
         var menu = RaceUiAssets.Button(RaceTextCatalog.Get("common.to_menu"), () => _ = ReturnToMenuAsync(), 22);

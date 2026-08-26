@@ -9,7 +9,7 @@ An in-game, native-style competitive speedrun client and Go race server for Slay
 - Version-isolated casual/ranked matchmaking, ready checks, millisecond server clock, surrender and result states.
 - Certified finish/highest-floor adjudication, death restart, event/combat SL budgets, Elo and visible ranked points.
 - Legend solo BO3 draft with persistent slot-one bans and game-one-only slot-two bans.
-- Entertainment rooms with A0-A10 and 0-9 SL customization, host-controlled start, per-player ready/character state, Steam friend invitations, and optional server coordination.
+- Entertainment rooms with A0-A10, BO1/BO3 and 0-9 SL customization, host-controlled start, per-player ready/character state, Steam friend invitations, and either direct Steam P2P or server coordination.
 - Steam local identity with deterministic demo profiles, friends, leaderboards, titles, and events.
 - Simplified Chinese and English UI.
 

@@ -100,6 +100,8 @@ public sealed class DemoRaceServicesTests
             Ascension = RaceRules.MaxAscension + 1
         }));
         RaceRules.Validate(RaceRules.EntertainmentDefault() with { Ascension = RaceRules.MaxAscension });
+        RaceRules.Validate(RaceRules.EntertainmentDefault() with { BestOf = 3 });
+        Assert.Throws<ArgumentOutOfRangeException>(() => RaceRules.Validate(RaceRules.EntertainmentDefault() with { BestOf = 2 }));
     }
 
     private sealed class StaticIdentityProvider : IRacePlatformIdentityProvider

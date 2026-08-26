@@ -92,5 +92,7 @@ public static class RaceRules
             throw new ArgumentException("A fixed seed cannot be empty.", nameof(rules));
         if (rules.EventSlLimit is < 0 or > 9 || rules.CombatSlLimit is < 0 or > 9)
             throw new ArgumentOutOfRangeException(nameof(rules), "SL limits must be between 0 and 9.");
+        if (rules.BestOf is not 1 and not 3)
+            throw new ArgumentOutOfRangeException(nameof(rules), "Series length must be BO1 or BO3.");
     }
 }

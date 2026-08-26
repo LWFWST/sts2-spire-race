@@ -159,7 +159,8 @@ public sealed record RaceRuleSet(
     IReadOnlyList<string> Modifiers,
     int EventSlLimit = 3,
     int CombatSlLimit = 3,
-    string CoordinationMode = "server");
+    string CoordinationMode = "server",
+    int BestOf = 1);
 
 public sealed record QueueRequest(
     QueueKind Kind,

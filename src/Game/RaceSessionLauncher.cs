@@ -10,6 +10,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.CustomRun;
 using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Logging;
+using System.Reflection;
 using Sts2SpireRace.Core;
 
 namespace Sts2SpireRace.Game;
@@ -58,7 +59,7 @@ public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyC
         if (assignment.TeamSize == TeamSize.One)
             throw new InvalidOperationException("A Steam cooperative lobby is not used for 1v1.");
         cancellationToken.ThrowIfCancellationRequested();
-        var service = new NetHostGameService(PeerVersionInfo.LocalDefault());
+        var service = CreateNetworkService<NetHostGameService>();
         var error = await service.StartSteamHost((int)assignment.TeamSize);
         if (error.HasValue)
             throw new InvalidOperationException($"Steam lobby creation failed: {error.Value.GetReason()}");
@@ -114,28 +115,56 @@ public sealed class RaceSessionLauncher : IRaceSessionLauncher, IRaceSteamLobbyC
         }
         else
         {
-            var join = new JoinFlow(new NetClientGameService(PeerVersionInfo.LocalDefault()));
+            var join = CreateJoinFlow();
             var result = await join.Begin(SteamClientConnectionInitializer.FromLobby(lobbyId), game.GetTree());
             cancellationToken.ThrowIfCancellationRequested();
             if (result.sessionState != RunSessionState.InLobby || !result.joinResponse.HasValue)
                 throw new InvalidOperationException("The assigned Steam lobby is no longer accepting players.");
+            var joinedService = typeof(JoinFlow).GetProperty("NetService", BindingFlags.Instance | BindingFlags.Public)?.GetValue(join) as INetGameService
+                ?? throw new InvalidOperationException("The original Steam join flow did not expose its network service.");
             if (assignment.Kind == QueueKind.Entertainment)
             {
                 var custom = mainMenu.SubmenuStack.GetSubmenuType<NCustomRunScreen>();
-                custom.InitializeMultiplayerAsClient(join.NetService, result.joinResponse.Value);
+                custom.InitializeMultiplayerAsClient(joinedService, result.joinResponse.Value);
                 mainMenu.SubmenuStack.Push(custom);
             }
             else
             {
                 var standard = mainMenu.SubmenuStack.GetSubmenuType<NCharacterSelectScreen>();
-                standard.InitializeMultiplayerAsClient(join.NetService, result.joinResponse.Value);
+                standard.InitializeMultiplayerAsClient(joinedService, result.joinResponse.Value);
                 mainMenu.SubmenuStack.Push(standard);
             }
         }
         Log.Info($"[SpireRace] Joined original Steam cooperative lobby {lobbyId} for race {assignment.MatchId}.");
     }
 
-    private static IReadOnlyList<ModifierModel> ResolveModifiers(IEnumerable<string> ids)
+    private static T CreateNetworkService<T>() where T : class
+    {
+        var type = typeof(T);
+        var parameterless = type.GetConstructor(Type.EmptyTypes);
+        if (parameterless is not null)
+            return (T)parameterless.Invoke(null);
+        var constructor = type.GetConstructors(BindingFlags.Instance | BindingFlags.Public).SingleOrDefault(x => x.GetParameters().Length == 1)
+            ?? throw new MissingMethodException(type.FullName, ".ctor");
+        var versionType = constructor.GetParameters()[0].ParameterType;
+        var localDefault = versionType.GetMethod("LocalDefault", BindingFlags.Static | BindingFlags.Public)
+            ?? throw new MissingMethodException(versionType.FullName, "LocalDefault");
+        return (T)constructor.Invoke([localDefault.Invoke(null, null)]);
+    }
+
+    private static JoinFlow CreateJoinFlow()
+    {
+        var type = typeof(JoinFlow);
+        var parameterless = type.GetConstructor(Type.EmptyTypes);
+        if (parameterless is not null)
+            return (JoinFlow)parameterless.Invoke(null);
+        var constructor = type.GetConstructors(BindingFlags.Instance | BindingFlags.Public).SingleOrDefault(x => x.GetParameters().Length == 1)
+            ?? throw new MissingMethodException(type.FullName, ".ctor");
+        var service = CreateNetworkService<NetClientGameService>();
+        return (JoinFlow)constructor.Invoke([service]);
+    }
+
+    private static List<ModifierModel> ResolveModifiers(IEnumerable<string> ids)
     {
         var result = new List<ModifierModel>();
         var canonical = ModelDb.GoodModifiers.Concat(ModelDb.BadModifiers).ToArray();

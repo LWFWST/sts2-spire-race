@@ -232,7 +232,7 @@ func TestLegendBO3PersistsBansAndOnlySettlesAfterTwoWins(t *testing.T) {
 	a := createStarted(t, service,
 		request("a", domain.QueueRanked, 1, "Legend", "a"),
 		request("b", domain.QueueRanked, 1, "Legend", "b"))
-	if !a.LegendSeries || a.StartedAtMS == 0 {
+	if !a.LegendSeries || a.StartedAtMS != 0 {
 		t.Fatal("Legend ready check did not enter the draft")
 	}
 	if err := service.SubmitLegendBans(context.Background(), "a", "Ironclad", "Silent"); err != nil {
@@ -242,6 +242,9 @@ func TestLegendBO3PersistsBansAndOnlySettlesAfterTwoWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _ = service.AssignmentFor("a")
+	if a.StartedAtMS == 0 {
+		t.Fatal("Legend game did not start after both bans were submitted")
+	}
 	finishLegendGame(t, service, a, "a", "b")
 	if len(repo.settlements) != 0 {
 		t.Fatal("BO3 settled after only one game")
@@ -257,6 +260,96 @@ func TestLegendBO3PersistsBansAndOnlySettlesAfterTwoWins(t *testing.T) {
 	finishLegendGame(t, service, second, "a", "b")
 	if len(repo.settlements) != 1 || repo.settlements[0].Reason != domain.ReasonSeriesVictory || len(repo.settlements[0].SeriesGames) != 2 {
 		t.Fatalf("unexpected BO3 settlement: %+v", repo.settlements)
+	}
+}
+
+func TestLegendBO3DraftTimeoutsSelectValidCharacters(t *testing.T) {
+	service := New(&fakeRepository{}, nil)
+	a := createStarted(t, service,
+		request("a", domain.QueueRanked, 1, "Legend", "a"),
+		request("b", domain.QueueRanked, 1, "Legend", "b"))
+	service.autoLegendBans(a.MatchID)
+	first, ok := service.AssignmentFor("a")
+	if !ok || first.StartedAtMS == 0 || !domain.IsPlayableCharacter(first.Rules.CharacterID) {
+		t.Fatalf("ban timeout did not start a valid first game: %+v", first)
+	}
+	finishLegendGame(t, service, first, "a", "b")
+	second, _ := service.AssignmentFor("a")
+	if second.StartedAtMS != 0 {
+		t.Fatal("second game started before the loser pick")
+	}
+	service.autoLegendPick(second.MatchID, second.GameID)
+	second, _ = service.AssignmentFor("a")
+	if second.StartedAtMS == 0 || !domain.IsPlayableCharacter(second.Rules.CharacterID) || second.Rules.CharacterID == first.Rules.CharacterID {
+		t.Fatalf("pick timeout did not start a fresh valid character: %+v", second)
+	}
+}
+
+func TestEntertainmentBO3OnlySettlesAfterTwoGameWins(t *testing.T) {
+	repo, notify := &fakeRepository{}, &fakeNotifier{}
+	service := New(repo, notify)
+	a := domain.Assignment{
+		MatchID: "fun-BO3", GameID: "fun-BO3-g1", GameVersion: "v0.111.0", Kind: domain.QueueEntertainment,
+		TeamSize: 1, FirstTeamID: "room-BO3-1", SecondTeamID: "room-BO3-2",
+		FirstPlayerIDs: []string{"a"}, SecondPlayerIDs: []string{"b"}, StartedAtMS: time.Now().UnixMilli(),
+		Rules: domain.Rules{TeamSize: 1, Seed: "first-seed", Ascension: 3, TimeLimitMS: domain.MaxMatchMilliseconds,
+			EventSLLimit: 3, CombatSLLimit: 3, CharacterID: "Ironclad", BestOf: 3},
+		CharacterIDs: map[string]string{"a": "Ironclad", "b": "Ironclad"},
+	}
+	if err := service.CreateEntertainment(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	finishLegendGame(t, service, a, "a", "b")
+	if len(repo.settlements) != 0 {
+		t.Fatal("entertainment BO3 settled after one game")
+	}
+	second, ok := service.AssignmentFor("a")
+	if !ok || second.GameID == a.GameID || second.Rules.Seed == a.Rules.Seed || second.StartedAtMS == 0 {
+		t.Fatalf("invalid second entertainment game: %+v", second)
+	}
+	finishLegendGame(t, service, second, "a", "b")
+	if len(repo.settlements) != 1 || repo.settlements[0].Reason != domain.ReasonSeriesVictory ||
+		len(repo.settlements[0].SeriesGames) != 2 || repo.ratingCalls != 0 {
+		t.Fatalf("unexpected entertainment BO3 settlement: %+v", repo.settlements)
+	}
+}
+
+func TestEntertainmentTeamBO3RecreatesSteamLobbiesForNextGame(t *testing.T) {
+	repo, notify := &fakeRepository{}, &fakeNotifier{}
+	service := New(repo, notify)
+	a := domain.Assignment{
+		MatchID: "fun-TEAMBO3", GameID: "fun-TEAMBO3-g1", GameVersion: "v0.111.0", Kind: domain.QueueEntertainment,
+		TeamSize: 2, FirstTeamID: "room-TEAMBO3-1", SecondTeamID: "room-TEAMBO3-2",
+		FirstPlayerIDs: []string{"a1", "a2"}, SecondPlayerIDs: []string{"b1", "b2"}, StartedAtMS: time.Now().UnixMilli(),
+		FirstSteamHostPlayerID: "a1", SecondSteamHostPlayerID: "b1",
+		Rules: domain.Rules{TeamSize: 2, Seed: "first-seed", Ascension: 3, TimeLimitMS: domain.MaxMatchMilliseconds,
+			EventSLLimit: 3, CombatSLLimit: 3, BestOf: 3},
+	}
+	if err := service.CreateEntertainment(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	finishLegendGame(t, service, a, "a1", "b1")
+	second, ok := service.AssignmentFor("a1")
+	if !ok || second.StartedAtMS != 0 || second.FirstSteamLobbyID != "" || second.SecondSteamLobbyID != "" {
+		t.Fatalf("team BO3 did not wait for fresh Steam lobbies: %+v", second)
+	}
+	if err := service.RegisterSteamLobby(context.Background(), "a1", "111"); err != nil {
+		t.Fatal(err)
+	}
+	if current, _ := service.AssignmentFor("a1"); current.StartedAtMS != 0 {
+		t.Fatal("team BO3 started before both Steam lobbies were ready")
+	}
+	if err := service.RegisterSteamLobby(context.Background(), "b1", "222"); err != nil {
+		t.Fatal(err)
+	}
+	second, _ = service.AssignmentFor("a1")
+	if second.StartedAtMS == 0 || second.FirstSteamLobbyID != "111" || second.SecondSteamLobbyID != "222" {
+		t.Fatalf("team BO3 did not start with fresh Steam lobbies: %+v", second)
+	}
+	finishLegendGame(t, service, second, "b1", "a1")
+	third, _ := service.AssignmentFor("a1")
+	if third.GameID == second.GameID || third.StartedAtMS != 0 {
+		t.Fatalf("third team BO3 game did not return to Steam lobby preparation: %+v", third)
 	}
 }
 

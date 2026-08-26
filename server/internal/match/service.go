@@ -110,6 +110,9 @@ func (s *Service) CreateEntertainment(ctx context.Context, a domain.Assignment) 
 	if a.StartedAtMS == 0 {
 		a.StartedAtMS = time.Now().UnixMilli()
 	}
+	if a.Rules.BestOf == 0 {
+		a.Rules.BestOf = 1
+	}
 	if err := s.repo.SaveMatch(ctx, a); err != nil {
 		return err
 	}
@@ -166,7 +169,7 @@ func (s *Service) Ready(ctx context.Context, playerID string) error {
 	}
 	st.Ready[teamID] = true
 	start := st.Confirmed[st.Assignment.FirstTeamID] && st.Confirmed[st.Assignment.SecondTeamID] && st.Ready[st.Assignment.FirstTeamID] && st.Ready[st.Assignment.SecondTeamID]
-	if start {
+	if start && !st.Assignment.LegendSeries {
 		st.Assignment.StartedAtMS = time.Now().UnixMilli()
 	}
 	a := st.Assignment
@@ -182,6 +185,7 @@ func (s *Service) Ready(ctx context.Context, playerID string) error {
 		if notifier != nil {
 			notifier.Broadcast(allPlayers(a), "legend_ban_required", map[string]any{"available_characters": domain.Characters, "draft": domain.LegendDraft{GameNumber: 1}})
 		}
+		time.AfterFunc(domain.LegendPickWindow, func() { s.autoLegendBans(a.MatchID) })
 		return nil
 	}
 	if a.TeamSize > 1 {
@@ -249,8 +253,8 @@ func (s *Service) startGame(ctx context.Context, a domain.Assignment) error {
 }
 
 func (s *Service) SubmitLegendBans(ctx context.Context, playerID, banOne, banTwo string) error {
-	if banOne == banTwo || !validCharacter(banOne) || !validCharacter(banTwo) {
-		return errors.New("two distinct playable characters are required")
+	if !validCharacter(banOne) || !validCharacter(banTwo) {
+		return errors.New("two playable characters are required")
 	}
 	s.mu.Lock()
 	st, _, err := s.stateForPlayer(playerID)
@@ -261,6 +265,10 @@ func (s *Service) SubmitLegendBans(ctx context.Context, playerID, banOne, banTwo
 	if !st.Assignment.LegendSeries {
 		s.mu.Unlock()
 		return errors.New("match is not a Legend series")
+	}
+	if st.Draft != nil {
+		s.mu.Unlock()
+		return errors.New("Legend bans are already locked")
 	}
 	st.Bans[playerID] = [2]string{banOne, banTwo}
 	p1, p2 := st.Assignment.FirstPlayerIDs[0], st.Assignment.SecondPlayerIDs[0]
@@ -285,6 +293,40 @@ func (s *Service) SubmitLegendBans(ctx context.Context, playerID, banOne, banTwo
 		notifier.Broadcast(allPlayers(a), "legend_draft_locked", d)
 	}
 	return s.startGame(ctx, a)
+}
+
+func (s *Service) autoLegendBans(matchID string) {
+	s.mu.Lock()
+	st := s.matches[matchID]
+	if st == nil || st.Settled || !st.Assignment.LegendSeries || st.Draft != nil {
+		s.mu.Unlock()
+		return
+	}
+	players := []string{st.Assignment.FirstPlayerIDs[0], st.Assignment.SecondPlayerIDs[0]}
+	missing := make([]string, 0, 2)
+	for _, playerID := range players {
+		if _, ok := st.Bans[playerID]; !ok {
+			missing = append(missing, playerID)
+		}
+	}
+	s.mu.Unlock()
+	for _, playerID := range missing {
+		first, second := randomLegendBanPair()
+		_ = s.SubmitLegendBans(context.Background(), playerID, first, second)
+	}
+}
+
+func randomLegendBanPair() (string, string) {
+	value := make([]byte, 2)
+	if _, err := rand.Read(value); err != nil {
+		return domain.Characters[0], domain.Characters[1]
+	}
+	firstIndex := int(value[0]) % len(domain.Characters)
+	secondIndex := int(value[1]) % (len(domain.Characters) - 1)
+	if secondIndex >= firstIndex {
+		secondIndex++
+	}
+	return domain.Characters[firstIndex], domain.Characters[secondIndex]
 }
 
 func (s *Service) SelectLegendCharacter(ctx context.Context, playerID, character string) error {
@@ -314,6 +356,22 @@ func (s *Service) SelectLegendCharacter(ctx context.Context, playerID, character
 		notifier.Broadcast(allPlayers(a), "legend_draft_locked", draft)
 	}
 	return s.startGame(ctx, a)
+}
+
+func (s *Service) autoLegendPick(matchID, gameID string) {
+	s.mu.Lock()
+	st := s.matches[matchID]
+	if st == nil || st.Settled || st.Assignment.GameID != gameID || st.Draft == nil ||
+		st.Draft.SelectingTeam == "" || st.Draft.Selected != "" || st.Assignment.StartedAtMS != 0 {
+		s.mu.Unlock()
+		return
+	}
+	selector := st.Assignment.FirstPlayerIDs[0]
+	if st.Draft.SelectingTeam == st.Assignment.SecondTeamID {
+		selector = st.Assignment.SecondPlayerIDs[0]
+	}
+	s.mu.Unlock()
+	_ = s.SelectLegendCharacter(context.Background(), selector, "")
 }
 
 func (s *Service) Progress(ctx context.Context, playerID, idempotency string, p domain.Progress) error {
@@ -535,7 +593,8 @@ func (s *Service) forfeitDisconnected(playerID string) {
 func (s *Service) expireUnstarted(matchID string) {
 	s.mu.Lock()
 	st := s.matches[matchID]
-	if st == nil || st.Settled || st.Assignment.StartedAtMS != 0 {
+	legendDraftActive := st != nil && st.Assignment.LegendSeries && st.Ready[st.Assignment.FirstTeamID] && st.Ready[st.Assignment.SecondTeamID]
+	if st == nil || st.Settled || st.Assignment.StartedAtMS != 0 || legendDraftActive {
 		s.mu.Unlock()
 		return
 	}
@@ -622,7 +681,67 @@ func (s *Service) trySettle(ctx context.Context, matchID string) error {
 				notifier.Broadcast(players, "legend_game_settled", game)
 				notifier.Broadcast(players, "legend_pick_required", map[string]any{"available_characters": domain.AvailableCharacters(draft, draft.GameNumber), "draft": draft})
 			}
+			time.AfterFunc(domain.LegendPickWindow, func() { s.autoLegendPick(a.MatchID, a.GameID) })
 			return nil
+		}
+		if !seriesForced {
+			settlement.Reason = domain.ReasonSeriesVictory
+		}
+		settlement.SeriesGames = append([]domain.LegendGame{}, st.SeriesGames...)
+	} else if st.Assignment.Kind == domain.QueueEntertainment && st.Assignment.Rules.BestOf == 3 {
+		elapsed := int64(0)
+		if settlement.WinnerTeamID == firstP.TeamID && firstP.CompletedAtMS != nil {
+			elapsed = *firstP.CompletedAtMS
+		}
+		if settlement.WinnerTeamID == secondP.TeamID && secondP.CompletedAtMS != nil {
+			elapsed = *secondP.CompletedAtMS
+		}
+		character := st.Assignment.Rules.CharacterID
+		if character == "" && st.Assignment.TeamSize == 1 && len(st.Assignment.FirstPlayerIDs) > 0 {
+			character = st.Assignment.CharacterIDs[st.Assignment.FirstPlayerIDs[0]]
+		}
+		game := domain.LegendGame{GameNumber: len(st.SeriesGames) + 1, GameID: st.Assignment.GameID,
+			CharacterID: character, WinnerTeamID: settlement.WinnerTeamID, Reason: settlement.Reason, ElapsedMS: elapsed}
+		st.SeriesGames = append(st.SeriesGames, game)
+		firstWins, secondWins := 0, 0
+		for _, played := range st.SeriesGames {
+			if played.WinnerTeamID == st.Assignment.FirstTeamID {
+				firstWins++
+			} else if played.WinnerTeamID == st.Assignment.SecondTeamID {
+				secondWins++
+			}
+		}
+		seriesForced := settlement.Reason == domain.ReasonDisconnect || settlement.Reason == domain.ReasonIntegrity
+		if !seriesForced && firstWins < 2 && secondWins < 2 {
+			st.Assignment.GameID, _ = randomHex(12)
+			st.Assignment.Rules.Seed, _ = randomHex(8)
+			st.Assignment.StartedAtMS = 0
+			st.Assignment.FirstSteamLobbyID = ""
+			st.Assignment.SecondSteamLobbyID = ""
+			st.Progress = map[string]domain.Progress{}
+			st.Idempotency = map[string]bool{}
+			st.PendingSL = map[string]bool{}
+			st.SurrenderVotes = map[string]map[string]bool{}
+			st.ForcedReasons = map[string]domain.FinishReason{}
+			st.SteamLobbyIDs = map[string]string{}
+			a := st.Assignment
+			if a.TeamSize == 1 {
+				a.StartedAtMS = time.Now().UnixMilli()
+				st.Assignment.StartedAtMS = a.StartedAtMS
+			}
+			players := allPlayers(a)
+			notifier := s.notifier
+			s.mu.Unlock()
+			if notifier != nil {
+				notifier.Broadcast(players, "series_game_settled", game)
+			}
+			if a.TeamSize > 1 {
+				if notifier != nil {
+					notifier.Broadcast([]string{a.FirstSteamHostPlayerID, a.SecondSteamHostPlayerID}, "steam_lobby_required", a)
+				}
+				return nil
+			}
+			return s.startGame(ctx, a)
 		}
 		if !seriesForced {
 			settlement.Reason = domain.ReasonSeriesVictory
