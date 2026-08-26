@@ -269,10 +269,10 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         var manifest = await GetAsync<IntegrityManifestDto>($"v1/integrity/{gameVersion}", false, cancellationToken);
         var root = Path.GetDirectoryName(Godot.OS.GetExecutablePath()) ?? AppContext.BaseDirectory;
         var files = new List<object>();
-        foreach (var file in manifest.GameFiles.Concat(manifest.AllowedModFiles))
+        foreach (var file in manifest.GameFiles)
         {
-            var path = Path.GetFullPath(Path.Combine(root, file.Path.Replace('/', Path.DirectorySeparatorChar)));
-            if (!path.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+            var path = ResolveContainedFile(root, file.Path);
+            if (path is null || !File.Exists(path))
             {
                 LastVerdict = IntegrityVerdict.ModifiedGameFile;
                 return LastVerdict;
@@ -281,7 +281,22 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
             var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken)).ToLowerInvariant();
             files.Add(new { path = file.Path, sha256 = hash, size = stream.Length });
         }
-        var modIds = ModManager.GetLoadedMods().Select(x => x.manifest?.id).Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
+        var loadedMods = ModManager.GetLoadedMods().ToArray();
+        foreach (var file in manifest.AllowedModFiles)
+        {
+            var path = ResolveLoadedModFile(file.Path, manifest.AllowedModIds, loadedMods);
+            if (path is null || !File.Exists(path))
+            {
+                LastVerdict = IntegrityVerdict.ModifiedGameFile;
+                return LastVerdict;
+            }
+            await using var stream = File.OpenRead(path);
+            var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken)).ToLowerInvariant();
+            // The server intentionally ignores physical paths. Keep the signed
+            // logical name here so no Workshop or Steam-library path is exposed.
+            files.Add(new { path = file.Path, sha256 = hash, size = stream.Length });
+        }
+        var modIds = loadedMods.Select(x => x.manifest?.id).Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
         var verdict = await PostAsync<IntegrityVerdictDto>("v1/integrity/verify", new
         {
             game_version = gameVersion,
@@ -301,6 +316,52 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         return LastVerdict;
         }
         finally { _integrityLock.Release(); }
+    }
+
+    private static string? ResolveLoadedModFile(string logicalPath, IReadOnlyList<string> allowedModIds,
+        IReadOnlyList<Mod> loadedMods)
+    {
+        var pieces = logicalPath.Replace('\\', '/').TrimStart('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        string modId;
+        string relativePath;
+        if (pieces.Length >= 3 && string.Equals(pieces[0], "mods", StringComparison.OrdinalIgnoreCase))
+        {
+            modId = pieces[1];
+            relativePath = Path.Combine(pieces.Skip(2).ToArray());
+        }
+        else if (allowedModIds.Count == 1)
+        {
+            if (pieces.Length == 0)
+                return null;
+            modId = allowedModIds[0];
+            relativePath = Path.Combine(pieces);
+        }
+        else
+        {
+            return null;
+        }
+        var mod = loadedMods.FirstOrDefault(x => string.Equals(x.manifest?.id, modId, StringComparison.Ordinal));
+        if (mod is null || string.IsNullOrWhiteSpace(mod.path))
+            return null;
+        var modRoot = mod.path.StartsWith("res://", StringComparison.OrdinalIgnoreCase)
+            ? Godot.ProjectSettings.GlobalizePath(mod.path)
+            : mod.path;
+        return ResolveContainedFile(modRoot, relativePath);
+    }
+
+    private static string? ResolveContainedFile(string directory, string relativePath)
+    {
+        try
+        {
+            var root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var candidate = Path.GetFullPath(Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+            var prefix = root + Path.DirectorySeparatorChar;
+            return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? candidate : null;
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
     }
 
     public async Task WarmupAsync(CancellationToken cancellationToken = default)

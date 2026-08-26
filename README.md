@@ -44,7 +44,7 @@ Production maintenance helpers keep credentials outside Git. `tools/update-steam
 
 With no `-SshKeyPath`, SSH and SCP use normal interactive password authentication. Add `-SshKeyPath` only after that public key has been installed on the server.
 
-Official access requires a valid Steam session ticket and an allowlisted SteamID. Self-hosted instances can disable official mode. Credentials, Steam tickets, TLS keys, integrity secrets, and game files are intentionally excluded from this repository.
+Official access requires a valid Steam session ticket and an allowlisted SteamID. Integrity verification resolves Mod files through the original game's loaded `Mod.path`, so local and Steam Workshop installations share the same signed hashes even when their physical directories or Steam libraries differ. The server deliberately ignores submitted paths while still requiring the exact SHA-256, size, file count, and loaded-Mod ID set. Self-hosted instances can disable official mode. Credentials, Steam tickets, TLS keys, integrity secrets, and game files are intentionally excluded from this repository.
 
 ## Development checks
 

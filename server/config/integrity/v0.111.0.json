@@ -1,6 +1,6 @@
 {
   "game_version": "v0.111.0",
-  "manifest_version": "sha256-1",
+  "manifest_version": "sha256-2-path-independent",
   "game_files": [
     {
       "path": "SlayTheSpire2.exe",
@@ -26,12 +26,12 @@
     },
     {
       "path": "mods/sts2-spire-race/sts2-spire-race.dll",
-      "sha256": "b4b30ee0e4b66c043f34850fe1eec4882ab50315ff8eeab7ccbb40894fa1f79a",
-      "size": 512512
+      "sha256": "eac51e7fdad5b6f35d8f3aacec5bac1ff93be183d76cacf54246342016b04d5f",
+      "size": 514048
     }
   ],
   "allowed_mod_ids": [
     "sts2-spire-race"
   ],
-  "signature": "5ac7caffb8f094d25fa40136e900a85dd236049f5a9d85fea8a9b0f17707e334"
+  "signature": "547d25f7f3991b30e3ab3694246ee0b9d39a97a96ff4cb8d42b21b570e7425f1"
 }

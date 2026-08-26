@@ -31,7 +31,7 @@ func main() {
 		os.Exit(2)
 	}
 	gameFiles := []string{"SlayTheSpire2.exe", "SlayTheSpire2.pck", filepath.Join("data_sts2_windows_x86_64", "sts2.dll")}
-	m := integrity.Manifest{GameVersion: *version, ManifestVersion: "sha256-1", AllowedModIDs: []string{"sts2-spire-race"}}
+	m := integrity.Manifest{GameVersion: *version, ManifestVersion: "sha256-2-path-independent", AllowedModIDs: []string{"sts2-spire-race"}}
 	for _, relative := range gameFiles {
 		file, err := hashFile(filepath.Join(*gameDir, relative), filepath.ToSlash(relative))
 		if err != nil {

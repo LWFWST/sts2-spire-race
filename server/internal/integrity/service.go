@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 type File struct {
@@ -69,19 +70,25 @@ func (s Service) Verify(_ context.Context, a Attestation) (Verdict, error) {
 	if err != nil {
 		return Verdict{false, "unsupported_version", err.Error()}, nil
 	}
-	expected := map[string]File{}
+	type fingerprint struct {
+		SHA256 string
+		Size   int64
+	}
+	expected := map[fingerprint]int{}
 	for _, f := range append(append([]File{}, m.GameFiles...), m.AllowedModFiles...) {
-		expected[clean(f.Path)] = f
+		expected[fingerprint{strings.ToLower(f.SHA256), f.Size}]++
 	}
 	for _, f := range a.Files {
-		e, ok := expected[clean(f.Path)]
-		if !ok || !hmac.Equal([]byte(e.SHA256), []byte(f.SHA256)) || e.Size != f.Size {
+		key := fingerprint{strings.ToLower(f.SHA256), f.Size}
+		if expected[key] == 0 {
 			return Verdict{false, "modified_file", f.Path}, nil
 		}
-		delete(expected, clean(f.Path))
+		expected[key]--
 	}
-	if len(expected) > 0 {
-		return Verdict{false, "missing_file", "required integrity file was not reported"}, nil
+	for _, remaining := range expected {
+		if remaining > 0 {
+			return Verdict{false, "missing_file", "required integrity file was not reported"}, nil
+		}
 	}
 	allowed := map[string]bool{}
 	for _, id := range m.AllowedModIDs {
@@ -107,4 +114,3 @@ func Sign(m Manifest, secret []byte) (string, error) {
 	_, _ = mac.Write(payload)
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
-func clean(v string) string { return filepath.ToSlash(filepath.Clean(v)) }
