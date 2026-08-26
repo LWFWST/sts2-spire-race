@@ -33,14 +33,16 @@ Production maintenance helpers keep credentials outside Git. `tools/update-steam
   -ProductionEnvFile C:\secure\spire-race-production.env `
   -SteamId 76561198000000001,76561198000000002 `
   -Mode Add -ApplyRemote `
-  -ServerHost 134.122.116.15 -SshKeyPath C:\secure\server_ed25519
+  -ServerHost 134.122.116.15
 
 # Build the Mod, sign the exact retail/Mod hashes, and run the normal production deployment.
 .\tools\update-integrity-hashes.ps1 `
   -ProductionEnvFile C:\secure\spire-race-production.env `
   -GameVersion v0.111.0 -BuildMod -Deploy `
-  -ServerHost 134.122.116.15 -SshKeyPath C:\secure\server_ed25519
+  -ServerHost 134.122.116.15
 ```
+
+With no `-SshKeyPath`, SSH and SCP use normal interactive password authentication. Add `-SshKeyPath` only after that public key has been installed on the server.
 
 Official access requires a valid Steam session ticket and an allowlisted SteamID. Self-hosted instances can disable official mode. Credentials, Steam tickets, TLS keys, integrity secrets, and game files are intentionally excluded from this repository.
 

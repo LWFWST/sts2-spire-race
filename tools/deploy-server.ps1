@@ -1,6 +1,6 @@
 param(
-    [string]$ServerHost = '82.156.34.63',
-    [string]$ServerUser = 'ubuntu',
+    [string]$ServerHost = '134.122.116.15',
+    [string]$ServerUser = 'root',
     [string]$RemoteRoot = '/opt/sts2-spire-race',
     [string]$SshKeyPath = '',
     [string]$ProductionEnvFile = '',
@@ -50,16 +50,16 @@ try {
 
     & ssh @sshOptions $target "sudo mkdir -p '$RemoteRoot/releases' '$RemoteRoot/shared/tls' '$RemoteRoot/backups' && sudo chown -R '$ServerUser':'$ServerUser' '$RemoteRoot'"
     if ($LASTEXITCODE -ne 0) { throw 'Failed to prepare the remote deployment directory.' }
-    & scp @sshOptions $archive "${target}:$remoteArchive"
-    & scp @sshOptions $certificate "${target}:/tmp/spirerace.xyz_bundle.crt"
-    & scp @sshOptions $privateKey "${target}:/tmp/spirerace.xyz.key"
+    $bulkUploads = @($archive, $certificate, $privateKey)
     if (-not $BuildImageRemotely) {
-        & scp @sshOptions $imageArchive "${target}:$remoteImageArchive"
+        $bulkUploads += $imageArchive
     }
+    & scp @sshOptions @bulkUploads "${target}:/tmp/"
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to upload the release, TLS, or server-image files.' }
     if ($ProductionEnvFile) {
         & scp @sshOptions $ProductionEnvFile "${target}:/tmp/spire-race.env.production"
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to upload the production environment file.' }
     }
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to upload deployment files.' }
 
     $envInstall = if ($ProductionEnvFile) {
         "sudo install -m 0600 /tmp/spire-race.env.production '$RemoteRoot/shared/.env.production' &&"

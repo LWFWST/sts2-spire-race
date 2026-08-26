@@ -31,7 +31,7 @@ function Assert-SteamId64([string]$Value) {
 }
 
 function Get-SshOptions {
-    $options = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-p', $SshPort.ToString())
+    $options = @('-o', 'StrictHostKeyChecking=accept-new', '-p', $SshPort.ToString())
     if ($SshKeyPath) {
         $options += @('-i', (Resolve-Path -LiteralPath $SshKeyPath).Path)
     }
@@ -39,7 +39,7 @@ function Get-SshOptions {
 }
 
 function Get-ScpOptions {
-    $options = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-P', $SshPort.ToString())
+    $options = @('-o', 'StrictHostKeyChecking=accept-new', '-P', $SshPort.ToString())
     if ($SshKeyPath) {
         $options += @('-i', (Resolve-Path -LiteralPath $SshKeyPath).Path)
     }
