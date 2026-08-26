@@ -1,6 +1,8 @@
 param(
     [string]$ServerHost = '134.122.116.15',
     [string]$ServerUser = 'root',
+    [ValidateRange(1, 65535)]
+    [int]$SshPort = 2222,
     [string]$RemoteRoot = '/opt/sts2-spire-race',
     [string]$SshKeyPath = '',
     [string]$ProductionEnvFile = '',
@@ -17,10 +19,12 @@ $imageTag = "spire-race-server:$timestamp"
 $imageArchive = Join-Path ([System.IO.Path]::GetTempPath()) "spire-race-server-$timestamp.tar"
 $remoteImageArchive = "/tmp/spire-race-server-$timestamp.tar"
 $target = "$ServerUser@$ServerHost"
-$sshOptions = @('-o', 'StrictHostKeyChecking=accept-new')
+$sshOptions = @('-o', 'StrictHostKeyChecking=accept-new', '-p', $SshPort.ToString())
+$scpOptions = @('-o', 'StrictHostKeyChecking=accept-new', '-P', $SshPort.ToString())
 if ($SshKeyPath) {
     $resolvedKey = (Resolve-Path -LiteralPath $SshKeyPath).Path
     $sshOptions += @('-i', $resolvedKey)
+    $scpOptions += @('-i', $resolvedKey)
 }
 
 $certificate = Join-Path $TlsSource 'spirerace.xyz_bundle.crt'
@@ -54,10 +58,10 @@ try {
     if (-not $BuildImageRemotely) {
         $bulkUploads += $imageArchive
     }
-    & scp @sshOptions @bulkUploads "${target}:/tmp/"
+    & scp @scpOptions @bulkUploads "${target}:/tmp/"
     if ($LASTEXITCODE -ne 0) { throw 'Failed to upload the release, TLS, or server-image files.' }
     if ($ProductionEnvFile) {
-        & scp @sshOptions $ProductionEnvFile "${target}:/tmp/spire-race.env.production"
+        & scp @scpOptions $ProductionEnvFile "${target}:/tmp/spire-race.env.production"
         if ($LASTEXITCODE -ne 0) { throw 'Failed to upload the production environment file.' }
     }
 

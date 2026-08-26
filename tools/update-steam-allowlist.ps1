@@ -14,7 +14,7 @@ param(
     [string]$ServerHost = '134.122.116.15',
     [string]$ServerUser = 'root',
     [ValidateRange(1, 65535)]
-    [int]$SshPort = 22,
+    [int]$SshPort = 2222,
     [string]$SshKeyPath = '',
     [string]$RemoteRoot = '/opt/sts2-spire-race'
 )

@@ -11,6 +11,8 @@ param(
     [switch]$Deploy,
     [string]$ServerHost = '134.122.116.15',
     [string]$ServerUser = 'root',
+    [ValidateRange(1, 65535)]
+    [int]$SshPort = 2222,
     [string]$RemoteRoot = '/opt/sts2-spire-race',
     [string]$SshKeyPath = '',
     [string]$TlsSource = 'C:\CP\MCC2\spirerace.xyz_nginx',
@@ -110,6 +112,7 @@ if (-not $PSCmdlet.ShouldProcess("$ServerUser@$ServerHost", "Deploy the newly si
 $deployArguments = @{
     ServerHost = $ServerHost
     ServerUser = $ServerUser
+    SshPort = $SshPort
     RemoteRoot = $RemoteRoot
     ProductionEnvFile = $resolvedEnv
     TlsSource = $TlsSource
