@@ -653,13 +653,23 @@ public static class RaceScreens
             var seedRow = OptionRow(RaceTextCatalog.Get("fun.fixed"));
             var seedInput = RaceUiAssets.LineEdit("SEED", rules.Seed);
             seedInput.Editable = canEdit;
+            var committedSeed = rules.Seed;
             seedInput.TextChanged += text =>
             {
                 var next = page.Controller.EntertainmentRules with { Seed = text };
                 page.Controller.EntertainmentRules = next;
+            };
+            void CommitSeed(string text)
+            {
+                if (text == committedSeed) return;
+                committedSeed = text;
+                var next = page.Controller.EntertainmentRules with { Seed = text };
+                page.Controller.EntertainmentRules = next;
                 if (room is not null && canEdit && page.Controller.Services is IRaceEntertainmentRoomService roomService)
                     _ = UpdateEntertainmentRoomRulesAsync(page, roomService, next);
-            };
+            }
+            seedInput.TextSubmitted += CommitSeed;
+            seedInput.FocusExited += () => CommitSeed(seedInput.Text);
             seedRow.AddChild(seedInput);
             root.AddChild(seedRow);
         }
@@ -704,6 +714,7 @@ public static class RaceScreens
                 var seedRow = OptionRow(RaceTextCatalog.Format("fun.series_seed", index + 1));
                 var seedInput = RaceUiAssets.LineEdit("RANDOM", seeds[index]);
                 seedInput.Editable = canEdit;
+                var committedSeed = seeds[index];
                 seedInput.TextChanged += text =>
                 {
                     var nextSeeds = (page.Controller.EntertainmentRules.SeriesSeeds ?? Array.Empty<string>()).ToList();
@@ -716,9 +727,27 @@ public static class RaceScreens
                         SeriesSeeds = nextSeeds
                     });
                     page.Controller.EntertainmentRules = next;
+                };
+                void CommitSeriesSeed(string text)
+                {
+                    text = text.Trim();
+                    if (text == committedSeed) return;
+                    committedSeed = text;
+                    var nextSeeds = (page.Controller.EntertainmentRules.SeriesSeeds ?? Array.Empty<string>()).ToList();
+                    while (nextSeeds.Count < 3) nextSeeds.Add(string.Empty);
+                    nextSeeds[capturedIndex] = text;
+                    var next = RaceRules.NormalizeEntertainment(page.Controller.EntertainmentRules with
+                    {
+                        RandomSeed = false,
+                        Seed = nextSeeds[0],
+                        SeriesSeeds = nextSeeds
+                    });
+                    page.Controller.EntertainmentRules = next;
                     if (room is not null && canEdit && page.Controller.Services is IRaceEntertainmentRoomService roomService)
                         _ = UpdateEntertainmentRoomRulesAsync(page, roomService, next);
-                };
+                }
+                seedInput.TextSubmitted += CommitSeriesSeed;
+                seedInput.FocusExited += () => CommitSeriesSeed(seedInput.Text);
                 seedRow.AddChild(seedInput);
                 root.AddChild(seedRow);
             }
