@@ -293,20 +293,32 @@ func TestEntertainmentBO3OnlySettlesAfterTwoGameWins(t *testing.T) {
 		TeamSize: 1, FirstTeamID: "room-BO3-1", SecondTeamID: "room-BO3-2",
 		FirstPlayerIDs: []string{"a"}, SecondPlayerIDs: []string{"b"}, StartedAtMS: time.Now().UnixMilli(),
 		Rules: domain.Rules{TeamSize: 1, Seed: "first-seed", Ascension: 3, TimeLimitMS: domain.MaxMatchMilliseconds,
-			EventSLLimit: 3, CombatSLLimit: 3, CharacterID: "Ironclad", BestOf: 3},
+			EventSLLimit: 3, CombatSLLimit: 3, CharacterID: "Ironclad", BestOf: 3,
+			SeriesSeeds: []string{"first-seed", "second-seed", "third-seed"}},
 		CharacterIDs: map[string]string{"a": "Ironclad", "b": "Ironclad"},
 	}
 	if err := service.CreateEntertainment(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
+	if err := service.SubmitLegendBans(context.Background(), "a", "Ironclad", "Silent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SubmitLegendBans(context.Background(), "b", "Defect", "Regent"); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = service.AssignmentFor("a")
 	finishLegendGame(t, service, a, "a", "b")
 	if len(repo.settlements) != 0 {
 		t.Fatal("entertainment BO3 settled after one game")
 	}
 	second, ok := service.AssignmentFor("a")
-	if !ok || second.GameID == a.GameID || second.Rules.Seed == a.Rules.Seed || second.StartedAtMS == 0 {
+	if !ok || second.GameID == a.GameID || second.Rules.Seed != "second-seed" || second.StartedAtMS != 0 {
 		t.Fatalf("invalid second entertainment game: %+v", second)
 	}
+	if err := service.SelectLegendCharacter(context.Background(), "b", "Silent"); err != nil {
+		t.Fatal(err)
+	}
+	second, _ = service.AssignmentFor("a")
 	finishLegendGame(t, service, second, "a", "b")
 	if len(repo.settlements) != 1 || repo.settlements[0].Reason != domain.ReasonSeriesVictory ||
 		len(repo.settlements[0].SeriesGames) != 2 || repo.ratingCalls != 0 {

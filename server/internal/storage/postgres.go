@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -108,21 +109,23 @@ func (p *Postgres) RatingProfile(ctx context.Context, playerID, pool string) (Ra
 }
 
 type HistoryEntry struct {
-	MatchID              string    `json:"match_id"`
-	Kind                 string    `json:"kind"`
-	TeamSize             int       `json:"team_size"`
-	Victory              bool      `json:"victory"`
-	RunTimeMS            int64     `json:"run_time_ms"`
-	Completed            bool      `json:"completed"`
-	HighestFloor         int       `json:"highest_floor"`
-	Character            string    `json:"character"`
-	OpponentRunTimeMS    int64     `json:"opponent_run_time_ms"`
-	OpponentCompleted    bool      `json:"opponent_completed"`
-	OpponentHighestFloor int       `json:"opponent_highest_floor"`
-	OpponentNames        []string  `json:"opponent_names"`
-	OpponentCharacters   []string  `json:"opponent_characters"`
-	PlayedAt             time.Time `json:"played_at"`
-	RatingDelta          int       `json:"rating_delta"`
+	MatchID              string              `json:"match_id"`
+	Kind                 string              `json:"kind"`
+	TeamSize             int                 `json:"team_size"`
+	Victory              bool                `json:"victory"`
+	RunTimeMS            int64               `json:"run_time_ms"`
+	Completed            bool                `json:"completed"`
+	HighestFloor         int                 `json:"highest_floor"`
+	Character            string              `json:"character"`
+	OpponentRunTimeMS    int64               `json:"opponent_run_time_ms"`
+	OpponentCompleted    bool                `json:"opponent_completed"`
+	OpponentHighestFloor int                 `json:"opponent_highest_floor"`
+	OpponentNames        []string            `json:"opponent_names"`
+	OpponentCharacters   []string            `json:"opponent_characters"`
+	SeriesGames          []domain.LegendGame `json:"series_games,omitempty"`
+	LocalTeamID          string              `json:"local_team_id"`
+	PlayedAt             time.Time           `json:"played_at"`
+	RatingDelta          int                 `json:"rating_delta"`
 }
 
 func (p *Postgres) History(ctx context.Context, playerID string, limit int) ([]HistoryEntry, error) {
@@ -138,6 +141,7 @@ func (p *Postgres) History(ctx context.Context, playerID string, limit int) ([]H
 		NULLIF(m.settlement->'second'->>'highest_floor_entered_ms','null') AS second_floor_ms,
 		NULLIF(m.settlement->'second'->>'completion_ms','null') AS second_completion_ms,
 		COALESCE(m.payload->'character_ids'->>$1,m.payload->'rules'->>'character_id','') AS character_id,
+		COALESCE(m.settlement->'series_games','[]'::jsonb) AS series_games,
 		ARRAY(SELECT COALESCE(NULLIF(p2.display_name,''),mp2.player_id)
 			FROM match_participants mp2 LEFT JOIN players p2 ON p2.id=mp2.player_id
 			WHERE mp2.match_id=m.id AND mp2.team_id<>mp.team_id ORDER BY mp2.player_id) AS opponent_names,
@@ -160,13 +164,29 @@ func (p *Postgres) History(ctx context.Context, playerID string, limit int) ([]H
 		var firstFloorMs, firstCompletionMs, secondFloorMs, secondCompletionMs *string
 		var completedAt *time.Time
 		var playerTeam string
+		var seriesPayload []byte
 		if err := rows.Scan(&e.MatchID, &e.Kind, &e.TeamSize, &winnerTeamID, &completedAt,
 			&firstTeam, &firstOutcome, &firstFloor, &firstFloorMs, &firstCompletionMs,
 			&secondTeam, &secondOutcome, &secondFloor, &secondFloorMs, &secondCompletionMs,
-			&e.Character, &e.OpponentNames, &e.OpponentCharacters, &e.RatingDelta, &playerTeam); err != nil {
+			&e.Character, &seriesPayload, &e.OpponentNames, &e.OpponentCharacters, &e.RatingDelta, &playerTeam); err != nil {
 			return nil, err
 		}
+		if err := json.Unmarshal(seriesPayload, &e.SeriesGames); err != nil {
+			return nil, err
+		}
+		if len(e.SeriesGames) > 0 {
+			e.Character = e.SeriesGames[0].CharacterID
+			e.OpponentCharacters = []string{}
+			seenCharacters := map[string]bool{}
+			for _, game := range e.SeriesGames {
+				if game.CharacterID != "" && !seenCharacters[game.CharacterID] {
+					seenCharacters[game.CharacterID] = true
+					e.OpponentCharacters = append(e.OpponentCharacters, game.CharacterID)
+				}
+			}
+		}
 		e.Victory = playerTeam == winnerTeamID && winnerTeamID != ""
+		e.LocalTeamID = playerTeam
 		if playerTeam == firstTeam {
 			e.Completed, e.HighestFloor = firstOutcome == string(domain.OutcomeFinished), firstFloor
 			e.OpponentCompleted, e.OpponentHighestFloor = secondOutcome == string(domain.OutcomeFinished), secondFloor
@@ -362,10 +382,28 @@ func (p *Postgres) RemoveFriend(ctx context.Context, playerID, other string) err
 
 func (p *Postgres) SaveMatch(ctx context.Context, a domain.Assignment) error {
 	payload, _ := json.Marshal(a)
-	_, err := p.Pool.Exec(ctx, `INSERT INTO matches(id,game_version,kind,team_size,state,payload,started_at)
+	tx, err := p.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `INSERT INTO matches(id,game_version,kind,team_size,state,payload,started_at)
 		VALUES($1,$2,$3,$4,'ready_check',$5,NULL) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload`,
-		a.MatchID, a.GameVersion, a.Kind, a.TeamSize, payload)
-	return err
+		a.MatchID, a.GameVersion, a.Kind, a.TeamSize, payload); err != nil {
+		return err
+	}
+	for _, side := range []struct {
+		teamID  string
+		players []string
+	}{{a.FirstTeamID, a.FirstPlayerIDs}, {a.SecondTeamID, a.SecondPlayerIDs}} {
+		for _, playerID := range side.players {
+			if _, err = tx.Exec(ctx, `INSERT INTO match_participants(match_id,player_id,team_id,rating_before,rating_delta)
+				VALUES($1,$2,$3,1500,0) ON CONFLICT(match_id,player_id) DO NOTHING`, a.MatchID, playerID, side.teamID); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (p *Postgres) StartMatch(ctx context.Context, id string, startedAt time.Time) error {
@@ -435,7 +473,8 @@ func (p *Postgres) ApplyRatings(ctx context.Context, a domain.Assignment, winner
 				return nil, err
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO match_participants(match_id,player_id,team_id,rating_before,rating_delta)
-				VALUES($1,$2,$3,$4,$5) ON CONFLICT(match_id,player_id) DO NOTHING`, a.MatchID, row.PlayerID, side.team, row.Hidden, deltas[row.PlayerID]); err != nil {
+				VALUES($1,$2,$3,$4,$5) ON CONFLICT(match_id,player_id) DO UPDATE
+				SET team_id=excluded.team_id,rating_before=excluded.rating_before,rating_delta=excluded.rating_delta`, a.MatchID, row.PlayerID, side.team, row.Hidden, deltas[row.PlayerID]); err != nil {
 				return nil, err
 			}
 		}
@@ -647,9 +686,33 @@ func (p *Postgres) SwitchRoomTeam(ctx context.Context, code, playerID string) (E
 		}
 	}
 	if count >= room.Rules.TeamSize {
-		return room, errors.New("target team is full")
-	}
-	if _, err = p.Pool.Exec(ctx, `UPDATE entertainment_room_members SET team=$3,is_ready=false WHERE code=$1 AND player_id=$2`, code, playerID, target); err != nil {
+		// A full room can still exchange sides. Swap with the most recently
+		// joined member on the target team so both teams remain full.
+		var swapPlayer string
+		for i := len(room.Members) - 1; i >= 0; i-- {
+			if room.Members[i].Team == target && room.Members[i].PlayerID != playerID {
+				swapPlayer = room.Members[i].PlayerID
+				break
+			}
+		}
+		if swapPlayer == "" {
+			return room, errors.New("target team is full")
+		}
+		tx, txErr := p.Pool.Begin(ctx)
+		if txErr != nil {
+			return room, txErr
+		}
+		defer tx.Rollback(ctx)
+		if _, err = tx.Exec(ctx, `UPDATE entertainment_room_members SET team=$3,is_ready=false WHERE code=$1 AND player_id=$2`, code, playerID, target); err != nil {
+			return room, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE entertainment_room_members SET team=$3,is_ready=false WHERE code=$1 AND player_id=$2`, code, swapPlayer, 3-target); err != nil {
+			return room, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return room, err
+		}
+	} else if _, err = p.Pool.Exec(ctx, `UPDATE entertainment_room_members SET team=$3,is_ready=false WHERE code=$1 AND player_id=$2`, code, playerID, target); err != nil {
 		return room, err
 	}
 	return p.RoomSnapshot(ctx, code)
@@ -668,6 +731,14 @@ func (p *Postgres) SetRoomMember(ctx context.Context, code, playerID, characterI
 	}
 	var tag pgconn.CommandTag
 	if room.Rules.TeamSize == 1 {
+		if room.HostPlayerID != playerID {
+			for _, member := range room.Members {
+				if member.PlayerID == room.HostPlayerID {
+					characterID = member.CharacterID
+					break
+				}
+			}
+		}
 		tx, beginErr := p.Pool.Begin(ctx)
 		if beginErr != nil {
 			return EntertainmentRoomSnapshot{}, beginErr
@@ -717,10 +788,28 @@ func (p *Postgres) StartRoom(ctx context.Context, code, playerID, sharedSeed str
 	if err = json.Unmarshal(payload, &rules); err != nil {
 		return EntertainmentRoomSnapshot{}, err
 	}
+	rules = domain.NormalizeEntertainmentRules(rules)
 	if rules.RandomSeed {
 		rules.Seed = sharedSeed
-		payload, _ = json.Marshal(rules)
+		if rules.BestOf == 3 {
+			rules.SeriesSeeds = []string{sharedSeed, sharedSeed + "-2", sharedSeed + "-3"}
+		}
 	}
+	if rules.BestOf == 3 {
+		for len(rules.SeriesSeeds) < 3 {
+			rules.SeriesSeeds = append(rules.SeriesSeeds, "")
+		}
+		if strings.TrimSpace(rules.SeriesSeeds[0]) == "" && strings.TrimSpace(rules.Seed) != "" {
+			rules.SeriesSeeds[0] = strings.TrimSpace(rules.Seed)
+		}
+		for i := range rules.SeriesSeeds {
+			if strings.TrimSpace(rules.SeriesSeeds[i]) == "" {
+				rules.SeriesSeeds[i] = fmt.Sprintf("%s-%d", sharedSeed, i+1)
+			}
+		}
+		rules.Seed = rules.SeriesSeeds[0]
+	}
+	payload, _ = json.Marshal(rules)
 	rows, err := tx.Query(ctx, `SELECT team,is_ready,character_id FROM entertainment_room_members WHERE code=$1`, code)
 	if err != nil {
 		return EntertainmentRoomSnapshot{}, err

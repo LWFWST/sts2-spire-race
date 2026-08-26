@@ -61,6 +61,7 @@ type Rules struct {
 	Visibility               string   `json:"visibility,omitempty"`
 	CoordinationMode         string   `json:"coordination_mode,omitempty"`
 	BestOf                   int      `json:"best_of,omitempty"`
+	SeriesSeeds              []string `json:"series_seeds,omitempty"`
 }
 
 type Progress struct {

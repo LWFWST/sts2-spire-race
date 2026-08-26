@@ -54,6 +54,51 @@ func DefaultRules(req QueueRequest, seed string) (Rules, error) {
 		EventSLLimit: sl, CombatSLLimit: sl, CharacterID: character, Modifiers: []string{}}, nil
 }
 
+// NormalizeEntertainmentRules fixes the small set of rules that are part of
+// the entertainment product contract rather than user-editable options.
+// Character duplication is always allowed, 1v1 uses the host's shared pick,
+// and the certified race adjudicator is always used.
+func NormalizeEntertainmentRules(rules Rules) Rules {
+	if rules.Modifiers == nil {
+		rules.Modifiers = []string{}
+	}
+	if len(rules.Modifiers) > 0 {
+		seen := map[string]bool{}
+		filtered := make([]string, 0, len(rules.Modifiers))
+		for _, modifier := range rules.Modifiers {
+			modifier = strings.TrimSpace(modifier)
+			if modifier != "" && !seen[strings.ToLower(modifier)] {
+				seen[strings.ToLower(modifier)] = true
+				filtered = append(filtered, modifier)
+			}
+		}
+		rules.Modifiers = filtered
+	}
+	rules.AllowDuplicateCharacters = true
+	rules.CharacterPolicy = "host_for_1v1"
+	rules.VictoryRule = "certified_race"
+	rules.AllowSpectators = false
+	if len(rules.SeriesSeeds) > 3 {
+		rules.SeriesSeeds = append([]string(nil), rules.SeriesSeeds[:3]...)
+	}
+	for i := range rules.SeriesSeeds {
+		rules.SeriesSeeds[i] = strings.TrimSpace(rules.SeriesSeeds[i])
+	}
+	return rules
+}
+
+func SeriesSeed(rules Rules, gameNumber int, fallback string) string {
+	if gameNumber >= 1 && gameNumber <= len(rules.SeriesSeeds) {
+		if seed := strings.TrimSpace(rules.SeriesSeeds[gameNumber-1]); seed != "" {
+			return seed
+		}
+	}
+	if gameNumber == 1 && strings.TrimSpace(rules.Seed) != "" {
+		return strings.TrimSpace(rules.Seed)
+	}
+	return fallback
+}
+
 func IsPlayableCharacter(value string) bool {
 	for _, character := range Characters {
 		if character == value {

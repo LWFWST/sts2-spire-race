@@ -55,6 +55,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
             _p2p.RoomExited += OnP2PRoomExited;
             _p2p.MatchChanged += OnP2PMatchChanged;
             _p2p.MatchSettled += OnP2PMatchSettled;
+            _p2p.LegendDraftChanged += OnP2PLegendDraftChanged;
         }
         _http = CreateHttpClient(serverUri ?? RaceRuntimeInfo.ServerUri);
     }
@@ -421,12 +422,17 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         ? _p2p!.VoteSurrenderAsync(accept, cancellationToken)
         : SendSocketAsync("surrender_vote", new { accept }, cancellationToken);
     public Task SubmitLegendBansAsync(string banOne, string banTwo, CancellationToken cancellationToken = default) =>
-        SendSocketAsync("legend_bans", new { ban_one = banOne, ban_two = banTwo }, cancellationToken);
+        IsP2PMatch
+            ? _p2p!.SubmitLegendBansAsync(banOne, banTwo, cancellationToken)
+            : SendSocketAsync("legend_bans", new { ban_one = banOne, ban_two = banTwo }, cancellationToken);
     public Task SelectLegendCharacterAsync(string characterId, CancellationToken cancellationToken = default) =>
-        SendSocketAsync("legend_pick", new { character_id = characterId }, cancellationToken);
+        IsP2PMatch
+            ? _p2p!.SelectLegendCharacterAsync(characterId, cancellationToken)
+            : SendSocketAsync("legend_pick", new { character_id = characterId }, cancellationToken);
 
     public async Task<EntertainmentRoom> CreateRoomAsync(RaceRuleSet rules, CancellationToken cancellationToken = default)
     {
+        rules = RaceRules.NormalizeEntertainment(rules);
         if (rules.CoordinationMode == "p2p")
         {
             if (_p2p is null) throw new InvalidOperationException("Steam P2P race coordination is unavailable.");
@@ -445,6 +451,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     }
     public async Task<EntertainmentRoom> UpdateRoomRulesAsync(RaceRuleSet rules, CancellationToken cancellationToken = default)
     {
+        rules = RaceRules.NormalizeEntertainment(rules);
         if (CurrentRoom is null) throw new InvalidOperationException("No entertainment room is active.");
         if (CurrentRoom.CoordinationMode == EntertainmentCoordinationMode.SteamP2P)
             return await _p2p!.UpdateRoomRulesAsync(rules, cancellationToken);
@@ -769,7 +776,10 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         _opponentTeam = BuildTeam(localFirst ? dto.SecondTeamId : dto.FirstTeamId, "Red", opponentIds, string.Empty, dto.Rules.CharacterId, dto.CharacterIds);
         var kind = dto.Kind switch { "ranked" => QueueKind.Ranked, "entertainment" => QueueKind.Entertainment, _ => QueueKind.Casual };
         var rules = FromServerRules(dto.Rules);
-        _queueRequest ??= new QueueRequest(kind, (TeamSize)dto.TeamSize, RaceRules.PoolFor((TeamSize)dto.TeamSize), rules);
+        if (kind == QueueKind.Entertainment)
+            _queueRequest = new QueueRequest(kind, (TeamSize)dto.TeamSize, null, rules);
+        else
+            _queueRequest ??= new QueueRequest(kind, (TeamSize)dto.TeamSize, RaceRules.PoolFor((TeamSize)dto.TeamSize), rules);
         CurrentMatch = new MatchAssignment(dto.MatchId, dto.GameId, dto.GameVersion, kind, (TeamSize)dto.TeamSize, rules,
             _localTeam, _opponentTeam, dto.Rules.CharacterId, dto.SessionNonce, dto.StartedAtMs, null, dto.CharacterIds,
             dto.FirstSteamHostPlayerId, dto.SecondSteamHostPlayerId, dto.FirstSteamLobbyId, dto.SecondSteamLobbyId);
@@ -920,12 +930,14 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         string.IsNullOrEmpty(x.TimerKind) ? "server_time" : x.TimerKind, (int)(x.TimeLimitMs / 60000),
         string.IsNullOrEmpty(x.VictoryRule) ? "certified_race" : x.VictoryRule, x.AllowSpectators,
         string.IsNullOrEmpty(x.Visibility) ? "matchmade" : x.Visibility, x.Modifiers, x.EventSlLimit, x.CombatSlLimit,
-        string.IsNullOrEmpty(x.CoordinationMode) ? "server" : x.CoordinationMode, x.BestOf is 3 ? 3 : 1);
+        string.IsNullOrEmpty(x.CoordinationMode) ? "server" : x.CoordinationMode, x.BestOf is 3 ? 3 : 1,
+        x.SeriesSeeds ?? Array.Empty<string>());
     private static object ToServerRules(RaceRuleSet x) => new { team_size = (int)x.TeamSize, seed = x.Seed, ascension = x.Ascension,
         time_limit_ms = x.TimeLimitMinutes * 60_000L, event_sl_limit = x.EventSlLimit, combat_sl_limit = x.CombatSlLimit,
         character_id = "", modifiers = x.Modifiers, random_seed = x.RandomSeed, allow_duplicate_characters = x.AllowDuplicateCharacters,
         character_policy = x.CharacterPolicy, timer_kind = x.TimerKind, victory_rule = x.VictoryRule,
-        allow_spectators = false, visibility = x.Visibility, coordination_mode = x.CoordinationMode, best_of = x.BestOf };
+        allow_spectators = false, visibility = x.Visibility, coordination_mode = x.CoordinationMode, best_of = x.BestOf,
+        series_seeds = x.SeriesSeeds ?? Array.Empty<string>() };
     private EntertainmentRoom ApplyRoom(RoomDto x)
     {
         var room = new EntertainmentRoom(x.Code, x.HostPlayerId, FromServerRules(x.Rules),
@@ -976,6 +988,14 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
             settlement.WinnerTeamId == _localTeam.Id, 0, settlement.CompletedAt, settlement);
         SetQueue(new QueueSnapshot(QueueState.Completed, _queueRequest, _localTeam, _opponentTeam, result, "p2p_completed"));
     }
+
+    private void OnP2PLegendDraftChanged(LegendDraftPrompt? prompt)
+    {
+        CurrentLegendDraft = prompt;
+        LegendDraftChanged?.Invoke(prompt);
+        if (prompt is not null)
+            SetQueue(CurrentQueue with { State = QueueState.Draft, Detail = prompt.IsBanPhase ? "legend_ban" : "legend_pick" });
+    }
     private RaceParty ApplyParty(PartyDto x)
     {
         var identityId = (_identity?.PlatformId ?? 0).ToString();
@@ -1024,8 +1044,12 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
             TimeSpan.FromMilliseconds(x.RunTimeMs), string.IsNullOrEmpty(x.Character) ? "Ironclad" : x.Character,
             x.PlayedAt, x.RatingDelta, x.Completed, x.HighestFloor, TimeSpan.FromMilliseconds(x.OpponentRunTimeMs),
             x.OpponentCompleted, x.OpponentHighestFloor, x.OpponentNames ?? Array.Empty<string>(),
-            x.OpponentCharacters ?? Array.Empty<string>())).ToArray(),
+            x.OpponentCharacters ?? Array.Empty<string>(),
+            (x.SeriesGames ?? Array.Empty<LegendGameDto>()).Select(ToLegendGame).ToArray(), x.LocalTeamId)).ToArray(),
         local);
+
+    private static LegendGameResult ToLegendGame(LegendGameDto x) => new(x.GameNumber,
+        x.CharacterId, x.WinnerTeamId, ParseFinishReason(x.Reason), x.ElapsedMs);
 
     private static QueueKind ParseKind(string value) => value switch { "ranked" => QueueKind.Ranked, "casual" => QueueKind.Casual, _ => QueueKind.Entertainment };
     private static FriendEntry MapSocial(SocialDto x) => new(x.PlayerId, x.DisplayName,
@@ -1044,6 +1068,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
             _p2p.RoomExited -= OnP2PRoomExited;
             _p2p.MatchChanged -= OnP2PMatchChanged;
             _p2p.MatchSettled -= OnP2PMatchSettled;
+            _p2p.LegendDraftChanged -= OnP2PLegendDraftChanged;
         }
         _ticketProvider.Dispose(); _http.Dispose(); _authenticationLock.Dispose(); _socketWriteLock.Dispose(); _integrityLock.Dispose();
         await Task.CompletedTask;
@@ -1062,7 +1087,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         string FirstSteamLobbyId = "", string SecondSteamLobbyId = "");
     private sealed record ServerRulesDto(int TeamSize, string Seed, int Ascension, long TimeLimitMs, int EventSlLimit, int CombatSlLimit, string CharacterId,
         string[] Modifiers, bool RandomSeed = false, bool AllowDuplicateCharacters = true, string CharacterPolicy = "", string TimerKind = "",
-        string VictoryRule = "", bool AllowSpectators = false, string Visibility = "", string CoordinationMode = "server", int BestOf = 1);
+        string VictoryRule = "", bool AllowSpectators = false, string Visibility = "", string CoordinationMode = "server", int BestOf = 1,
+        string[]? SeriesSeeds = null);
     private sealed record IntegrityManifestDto(string GameVersion, string ManifestVersion, IntegrityFileDto[] GameFiles, IntegrityFileDto[] AllowedModFiles, string[] AllowedModIds, string Signature);
     private sealed record IntegrityFileDto(string Path, string Sha256, long Size);
     private sealed record IntegrityVerdictDto(bool Accepted, string Code, string Detail);
@@ -1076,7 +1102,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     private sealed record RatingDto(string Tier, int Points, int Games, int HiddenRating, int Wins = 0, int Losses = 0, int Division = 4, int LeaderboardRank = 0);
     private sealed record HistoryDto(string MatchId, string Kind, int TeamSize, bool Victory, long RunTimeMs, string Character,
         DateTimeOffset PlayedAt, int RatingDelta, bool Completed = false, int HighestFloor = 0, long OpponentRunTimeMs = 0,
-        bool OpponentCompleted = false, int OpponentHighestFloor = 0, string[]? OpponentNames = null, string[]? OpponentCharacters = null);
+        bool OpponentCompleted = false, int OpponentHighestFloor = 0, string[]? OpponentNames = null, string[]? OpponentCharacters = null,
+        LegendGameDto[]? SeriesGames = null, string LocalTeamId = "");
     private sealed record LeaderboardDto(int Position, string PlayerId, string DisplayName, string Tier, int Rating, int Wins, int Losses, long BestTimeMs = 0);
     private sealed record SocialDto(string PlayerId, string DisplayName, string Relationship, string Tier, bool Online, bool InRace);
     private sealed record RaceInviteDto(string PlayerId, string DisplayName, string RoomCode = "", string PartyId = "", string Kind = "casual", int TeamSize = 1);

@@ -107,17 +107,25 @@ func (s *Service) CreateEntertainment(ctx context.Context, a domain.Assignment) 
 	if a.Kind != domain.QueueEntertainment || len(a.FirstPlayerIDs) == 0 || len(a.SecondPlayerIDs) == 0 {
 		return errors.New("invalid entertainment assignment")
 	}
-	if a.StartedAtMS == 0 {
-		a.StartedAtMS = time.Now().UnixMilli()
-	}
+	a.Rules = domain.NormalizeEntertainmentRules(a.Rules)
 	if a.Rules.BestOf == 0 {
 		a.Rules.BestOf = 1
+	}
+	a.LegendSeries = a.TeamSize == 1 && a.Rules.BestOf == 3
+	if a.LegendSeries {
+		// BO3 1v1 starts in the Ban phase; the race clock begins only after
+		// both bans are locked and the first shared character is selected.
+		a.StartedAtMS = 0
+	} else if a.StartedAtMS == 0 {
+		a.StartedAtMS = time.Now().UnixMilli()
 	}
 	if err := s.repo.SaveMatch(ctx, a); err != nil {
 		return err
 	}
-	if err := s.repo.StartMatch(ctx, a.MatchID, time.UnixMilli(a.StartedAtMS)); err != nil {
-		return err
+	if !a.LegendSeries {
+		if err := s.repo.StartMatch(ctx, a.MatchID, time.UnixMilli(a.StartedAtMS)); err != nil {
+			return err
+		}
 	}
 	st := &state{Assignment: a, Confirmed: map[string]bool{}, Ready: map[string]bool{}, Progress: map[string]domain.Progress{},
 		Idempotency: map[string]bool{}, SurrenderVotes: map[string]map[string]bool{}, PendingSL: map[string]bool{},
@@ -127,8 +135,16 @@ func (s *Service) CreateEntertainment(ctx context.Context, a domain.Assignment) 
 	for _, playerID := range allPlayers(a) {
 		s.playerMatch[playerID] = a.MatchID
 	}
+	notifier := s.notifier
 	s.mu.Unlock()
-	time.AfterFunc(time.Duration(a.Rules.TimeLimitMS)*time.Millisecond, func() { s.timeout(a.MatchID, a.GameID) })
+	if a.LegendSeries {
+		if notifier != nil {
+			notifier.Broadcast(allPlayers(a), "legend_ban_required", map[string]any{"available_characters": domain.Characters, "draft": domain.LegendDraft{GameNumber: 1}})
+		}
+		time.AfterFunc(domain.LegendPickWindow, func() { s.autoLegendBans(a.MatchID) })
+	} else {
+		time.AfterFunc(time.Duration(a.Rules.TimeLimitMS)*time.Millisecond, func() { s.timeout(a.MatchID, a.GameID) })
+	}
 	return nil
 }
 
@@ -665,7 +681,8 @@ func (s *Service) trySettle(ctx context.Context, matchID string) error {
 			st.Draft.Selected = ""
 			st.Draft.SelectingTeam = losingTeam
 			st.Assignment.GameID, _ = randomHex(12)
-			st.Assignment.Rules.Seed, _ = randomHex(8)
+			fallback, _ := randomHex(8)
+			st.Assignment.Rules.Seed = domain.SeriesSeed(st.Assignment.Rules, st.Draft.GameNumber, fallback)
 			st.Assignment.Rules.CharacterID = ""
 			st.Assignment.StartedAtMS = 0
 			st.Progress = map[string]domain.Progress{}
@@ -714,7 +731,8 @@ func (s *Service) trySettle(ctx context.Context, matchID string) error {
 		seriesForced := settlement.Reason == domain.ReasonDisconnect || settlement.Reason == domain.ReasonIntegrity
 		if !seriesForced && firstWins < 2 && secondWins < 2 {
 			st.Assignment.GameID, _ = randomHex(12)
-			st.Assignment.Rules.Seed, _ = randomHex(8)
+			fallback, _ := randomHex(8)
+			st.Assignment.Rules.Seed = domain.SeriesSeed(st.Assignment.Rules, len(st.SeriesGames)+1, fallback)
 			st.Assignment.StartedAtMS = 0
 			st.Assignment.FirstSteamLobbyID = ""
 			st.Assignment.SecondSteamLobbyID = ""

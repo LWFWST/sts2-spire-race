@@ -88,7 +88,12 @@ public sealed class DemoRaceServicesTests
     [Fact]
     public void EntertainmentRulesValidateFixedSeedAndBounds()
     {
-        Assert.Equal("p2p", RaceRules.EntertainmentDefault().CoordinationMode);
+        var defaults = RaceRules.EntertainmentDefault();
+        Assert.Equal("p2p", defaults.CoordinationMode);
+        Assert.Empty(defaults.Modifiers);
+        Assert.True(defaults.AllowDuplicateCharacters);
+        Assert.Equal("host_for_1v1", defaults.CharacterPolicy);
+        Assert.Equal("certified_race", defaults.VictoryRule);
         RaceRules.Validate(RaceRules.EntertainmentDefault());
         Assert.Throws<ArgumentException>(() => RaceRules.Validate(RaceRules.EntertainmentDefault() with
         {
@@ -101,6 +106,20 @@ public sealed class DemoRaceServicesTests
         }));
         RaceRules.Validate(RaceRules.EntertainmentDefault() with { Ascension = RaceRules.MaxAscension });
         RaceRules.Validate(RaceRules.EntertainmentDefault() with { BestOf = 3 });
+        var customSeries = RaceRules.NormalizeEntertainment(RaceRules.EntertainmentDefault() with
+        {
+            BestOf = 3,
+            RandomSeed = false,
+            Seed = "",
+            SeriesSeeds = ["FIRST", "", "THIRD"],
+            AllowDuplicateCharacters = false,
+            CharacterPolicy = "random_pick",
+            VictoryRule = "custom"
+        });
+        RaceRules.Validate(customSeries);
+        Assert.Equal(["FIRST", "", "THIRD"], customSeries.SeriesSeeds);
+        Assert.True(customSeries.AllowDuplicateCharacters);
+        Assert.Equal("host_for_1v1", customSeries.CharacterPolicy);
         Assert.Throws<ArgumentOutOfRangeException>(() => RaceRules.Validate(RaceRules.EntertainmentDefault() with { BestOf = 2 }));
     }
 

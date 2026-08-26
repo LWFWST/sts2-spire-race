@@ -26,12 +26,12 @@
     },
     {
       "path": "mods/sts2-spire-race/sts2-spire-race.dll",
-      "sha256": "b02e6b100da87009ef4a8d9671e678e85c4fa15d5aeeafa7d1676585652309f7",
-      "size": 537088
+      "sha256": "4682df48e3782ca19c0535a0b889f88b60d6802a1f95f5e651b9ac5ae25a7509",
+      "size": 556544
     }
   ],
   "allowed_mod_ids": [
     "sts2-spire-race"
   ],
-  "signature": "bb4ea9641443be23d01bfd964940827a882bfce5ce7c3a9ae8053a72629d1f56"
+  "signature": "0d6cae070e3937f01c5560287275cee54be6961ae15a7bdae6d2cbd761a4223b"
 }

@@ -25,6 +25,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
     private const string StartedAtKey = "spire_race_started_at";
     private const string GameKey = "spire_race_game";
     private const string SeriesGamesKey = "spire_race_series_games";
+    private const string DraftKey = "spire_race_draft";
     private const string RosterKey = "spire_race_roster";
     private const string SharedCharacterKey = "spire_race_character";
     private const string FirstHostKey = "spire_race_team1_host";
@@ -39,6 +40,10 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
     private const string MemberGameLobbyKey = "spire_race_game_lobby";
     private const string MemberProgressKey = "spire_race_progress";
     private const string MemberSeriesReadyKey = "spire_race_series_ready";
+    private const string MemberBansKey = "spire_race_bans";
+    private const string MemberPickKey = "spire_race_pick";
+    private const string MemberSwapRequestKey = "spire_race_swap_request";
+    private const string SwapPlanKey = "spire_race_swap_plan";
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly string[] Characters = ["Ironclad", "Silent", "Defect", "Necrobinder", "Regent"];
@@ -52,6 +57,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
     private string _appliedSettlement = string.Empty;
     private ProgressCheckpoint? _localProgress;
     private string _seriesPreparingGameId = string.Empty;
+    private string _appliedSwapPlan = string.Empty;
 
     public SteamP2PRaceCoordinator(RaceSessionLauncher launcher)
     {
@@ -63,13 +69,13 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
     public EntertainmentRoom? CurrentRoom { get; private set; }
     public MatchAssignment? CurrentMatch { get; private set; }
     public SettlementSnapshot? CurrentSettlement { get; private set; }
-    public LegendDraftPrompt? CurrentLegendDraft => null;
+    public LegendDraftPrompt? CurrentLegendDraft { get; private set; }
 
     public event Action<EntertainmentRoom?>? RoomChanged;
     public event Action<string>? RoomExited;
     public event Action<MatchAssignment?>? MatchChanged;
     public event Action<SettlementSnapshot>? MatchSettled;
-    public event Action<LegendDraftPrompt?>? LegendDraftChanged { add { } remove { } }
+    public event Action<LegendDraftPrompt?>? LegendDraftChanged;
 
     public static bool IsRaceLobby(ulong lobbyId) =>
         string.Equals(SteamMatchmaking.GetLobbyData(new CSteamID(lobbyId), MarkerKey), MarkerValue, StringComparison.Ordinal);
@@ -77,6 +83,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
     public async Task<EntertainmentRoom> CreateRoomAsync(RaceRuleSet rules, CancellationToken cancellationToken = default)
     {
         RequireSteam();
+        rules = RaceRules.NormalizeEntertainment(rules);
         RaceRules.Validate(rules);
         await LeaveRoomAsync(cancellationToken);
         rules = rules with { CoordinationMode = "p2p" };
@@ -93,6 +100,8 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         SetLobby(RulesKey, JsonSerializer.Serialize(rules, Json));
         SetLobby(StateKey, "waiting");
         SetLobby(SettlementKey, string.Empty);
+        SetLobby(DraftKey, string.Empty);
+        SetLobby(SwapPlanKey, string.Empty);
         SetLobby(GameKey, GetLobby(SessionKey) + "-g1");
         SetLobby(SeriesGamesKey, "[]");
         SetLocalMemberDefaults(1);
@@ -142,8 +151,16 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
     {
         cancellationToken.ThrowIfCancellationRequested();
         RequireHost();
-        rules = rules with { CoordinationMode = "p2p" };
+        rules = RaceRules.NormalizeEntertainment(rules) with { CoordinationMode = "p2p" };
         RaceRules.Validate(rules);
+        if (CurrentRoom is not null)
+        {
+            var counts = CurrentRoom.Members.GroupBy(x => x.Team).ToDictionary(x => x.Key, x => x.Count());
+            if (counts.GetValueOrDefault(1) > (int)rules.TeamSize || counts.GetValueOrDefault(2) > (int)rules.TeamSize)
+                throw new InvalidOperationException(RaceTextCatalog.Get("fun.team_size_too_low"));
+        }
+        if (!SteamMatchmaking.SetLobbyMemberLimit(_lobby!.Value, Math.Clamp((int)rules.TeamSize * 2, 2, 8)))
+            throw new InvalidOperationException("Steam failed to update the race lobby capacity.");
         SetLobby(RulesKey, JsonSerializer.Serialize(rules, Json));
         RefreshFromSteam();
         return Task.FromResult(CurrentRoom!);
@@ -156,7 +173,16 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         var local = LocalMember();
         var target = local.Team == 1 ? 2 : 1;
         if (CurrentRoom!.Members.Count(x => x.Team == target) >= (int)CurrentRoom.Rules.TeamSize)
-            throw new InvalidOperationException(RaceTextCatalog.Get("fun.team_full"));
+        {
+            // Steam only lets a client write its own member data. Ask the
+            // lobby owner to perform a full-team exchange; the owner handles
+            // the request in RefreshFromSteam and both affected clients apply
+            // their own side changes.
+            SteamMatchmaking.SetLobbyMemberData(_lobby!.Value, MemberSwapRequestKey,
+                JsonSerializer.Serialize(new TeamSwapRequest(local.PlayerId, target), Json));
+            RefreshFromSteam();
+            return Task.FromResult(CurrentRoom!);
+        }
         SteamMatchmaking.SetLobbyMemberData(_lobby!.Value, MemberTeamKey, target.ToString());
         SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberReadyKey, "0");
         RefreshFromSteam();
@@ -169,8 +195,17 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         RequireWaitingRoom();
         if (!Characters.Contains(characterId, StringComparer.Ordinal))
             characterId = "Ironclad";
+        if (CurrentRoom!.Rules.TeamSize == TeamSize.One && !IsLocalHost())
+        {
+            var shared = GetLobby(SharedCharacterKey);
+            characterId = Characters.Contains(shared, StringComparer.Ordinal)
+                ? shared
+                : CurrentRoom.Members.FirstOrDefault(x => x.IsHost)?.CharacterId ?? "Ironclad";
+        }
         SteamMatchmaking.SetLobbyMemberData(_lobby!.Value, MemberCharacterKey, characterId);
         SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberReadyKey, ready ? "1" : "0");
+        if (CurrentRoom.Rules.TeamSize == TeamSize.One && IsLocalHost())
+            SetLobby(SharedCharacterKey, characterId);
         RefreshFromSteam();
         return Task.FromResult(CurrentRoom!);
     }
@@ -186,9 +221,29 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
             room.Members.Count(x => x.Team == 1) != required || room.Members.Count(x => x.Team == 2) != required)
             throw new InvalidOperationException(RaceTextCatalog.Get("fun.everyone_ready_required"));
 
-        var rules = room.Rules;
+        var rules = RaceRules.NormalizeEntertainment(room.Rules);
         if (rules.RandomSeed)
-            rules = rules with { Seed = System.Security.Cryptography.RandomNumberGenerator.GetHexString(8), RandomSeed = false };
+        {
+            var firstSeed = System.Security.Cryptography.RandomNumberGenerator.GetHexString(8);
+            rules = rules with
+            {
+                Seed = firstSeed,
+                RandomSeed = false,
+                SeriesSeeds = rules.BestOf == 3
+                    ? [firstSeed, System.Security.Cryptography.RandomNumberGenerator.GetHexString(8), System.Security.Cryptography.RandomNumberGenerator.GetHexString(8)]
+                    : rules.SeriesSeeds
+            };
+        }
+        if (rules.BestOf == 3)
+        {
+            var seeds = (rules.SeriesSeeds ?? Array.Empty<string>()).ToList();
+            while (seeds.Count < 3) seeds.Add(string.Empty);
+            if (string.IsNullOrWhiteSpace(seeds[0]) && !string.IsNullOrWhiteSpace(rules.Seed)) seeds[0] = rules.Seed.Trim();
+            for (var index = 0; index < 3; index++)
+                if (string.IsNullOrWhiteSpace(seeds[index]))
+                    seeds[index] = System.Security.Cryptography.RandomNumberGenerator.GetHexString(8);
+            rules = rules with { Seed = seeds[0], RandomSeed = false, SeriesSeeds = seeds };
+        }
         var roster = room.Members.OrderBy(x => x.Team).ThenBy(x => x.PlayerId, StringComparer.Ordinal).ToArray();
         var firstHost = roster.First(x => x.Team == 1).PlayerId;
         var secondHost = roster.First(x => x.Team == 2).PlayerId;
@@ -200,8 +255,15 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         SetLobby(SharedCharacterKey, sharedCharacter);
         SetLobby(GameKey, GetLobby(SessionKey) + "-g1");
         SetLobby(SeriesGamesKey, "[]");
-        SetLobby(StartedAtKey, DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds().ToString());
-        SetLobby(StateKey, rules.TeamSize == TeamSize.One ? "launching" : "preparing_team_lobbies");
+        var requiresDraft = rules.TeamSize == TeamSize.One && rules.BestOf == 3;
+        SetLobby(DraftKey, requiresDraft
+            ? JsonSerializer.Serialize(new LegendDraftState("", "", "", "", Array.Empty<string>(), null, null,
+                1, 0, 0, DateTimeOffset.UtcNow.AddSeconds(RaceRules.LegendPickSeconds)), Json)
+            : string.Empty);
+        SetLobby(StartedAtKey, requiresDraft ? "0" : DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds().ToString());
+        SetLobby(StateKey, requiresDraft ? "draft_ban" : rules.TeamSize == TeamSize.One ? "launching" : "preparing_team_lobbies");
+        if (requiresDraft)
+            ScheduleDraftTimeout(GetLobby(GameKey), "draft_ban");
         RefreshFromSteam();
         return Task.FromResult(CurrentRoom!);
     }
@@ -268,8 +330,27 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         };
         return ReportProgressAsync(checkpoint, $"p2p-surrender:{Guid.NewGuid():N}", cancellationToken);
     }
-    public Task SubmitLegendBansAsync(string banOne, string banTwo, CancellationToken cancellationToken = default) => Task.CompletedTask;
-    public Task SelectLegendCharacterAsync(string characterId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public Task SubmitLegendBansAsync(string banOne, string banTwo, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_lobby is null || GetLobby(StateKey) != "draft_ban" || !Characters.Contains(banOne, StringComparer.Ordinal) ||
+            !Characters.Contains(banTwo, StringComparer.Ordinal) || banOne == banTwo)
+            throw new InvalidOperationException(RaceTextCatalog.Get("legend.ban.body"));
+        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberBansKey, JsonSerializer.Serialize(new[] { banOne, banTwo }, Json));
+        RefreshFromSteam();
+        return Task.CompletedTask;
+    }
+
+    public Task SelectLegendCharacterAsync(string characterId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_lobby is null || GetLobby(StateKey) != "draft_pick" || CurrentLegendDraft?.IsLocalSelector != true ||
+            !CurrentLegendDraft.AvailableCharacters.Contains(characterId, StringComparer.Ordinal))
+            throw new InvalidOperationException(RaceTextCatalog.Get("legend.pick.waiting"));
+        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberPickKey, characterId);
+        RefreshFromSteam();
+        return Task.CompletedTask;
+    }
 
     private void OnLobbyDataUpdate(LobbyDataUpdate_t update)
     {
@@ -314,6 +395,9 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
             }
         }
         var currentMembers = ReadMembers();
+        ApplySwapPlan(currentMembers);
+        if (IsLocalHost() && TryProcessTeamSwap(currentMembers))
+            state = GetLobby(StateKey);
         if (state is not "waiting" and not "completed")
         {
             var present = currentMembers.Select(x => x.PlayerId).ToHashSet(StringComparer.Ordinal);
@@ -328,6 +412,26 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         CurrentRoom = new EntertainmentRoom(RoomCode(_lobby.Value.m_SteamID), GetLobby(HostKey), rules, currentMembers,
             DateTimeOffset.UtcNow, EntertainmentCoordinationMode.SteamP2P, state);
         RoomChanged?.Invoke(CurrentRoom);
+
+        if (state is "draft_ban" or "draft_pick")
+        {
+            if (CurrentMatch is null)
+            {
+                CurrentMatch = BuildAssignment();
+                MatchChanged?.Invoke(CurrentMatch);
+            }
+            if (state == "draft_ban" && IsLocalHost() && TryStartP2PDraft(currentMembers))
+                state = GetLobby(StateKey);
+            else if (state == "draft_pick" && IsLocalHost() && TryStartP2PPick(currentMembers))
+                state = GetLobby(StateKey);
+            if (state is "draft_ban" or "draft_pick")
+                PublishDraftPrompt(state);
+        }
+        else if (CurrentLegendDraft is not null)
+        {
+            CurrentLegendDraft = null;
+            LegendDraftChanged?.Invoke(null);
+        }
 
         if (state == "preparing_team_lobbies")
         {
@@ -346,13 +450,137 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         }
         // Steam may coalesce lobby-data updates. A guest can observe "running"
         // without ever observing the short-lived "launching" value.
-        if (state is "launching" or "running" && CurrentMatch is null)
+        if (state is "launching" or "running" && (CurrentMatch is null || CurrentMatch.StartedAtUnixMilliseconds == 0))
+        {
+            if (CurrentMatch is not null)
+            {
+                CurrentMatch = null;
+                MatchChanged?.Invoke(null);
+            }
+            _launching = false;
             _ = LaunchLocalRaceAsync();
+        }
         var settlement = GetLobby(SettlementKey);
         if (!string.IsNullOrWhiteSpace(settlement) && settlement != _appliedSettlement)
             ApplySettlement(settlement);
         if (CanAdjudicate() && state is "running" or "launching")
             TrySettleFromProgress();
+    }
+
+    private void PublishDraftPrompt(string state)
+    {
+        var draft = ReadDraft() ?? new LegendDraftState("", "", "", "", Array.Empty<string>(), null, null, 1, 0, 0,
+            DateTimeOffset.UtcNow.AddSeconds(RaceRules.LegendPickSeconds));
+        var available = AvailableCharacters(draft, draft.GameNumber);
+        var banPhase = state == "draft_ban";
+        var localId = SteamUser.GetSteamID().m_SteamID.ToString();
+        var localTeam = ReadRoster().FirstOrDefault(x => x.PlayerId == localId)?.Team ?? 0;
+        var localTeamId = $"{GetLobby(SessionKey)}-team{localTeam}";
+        var prompt = new LegendDraftPrompt(draft, available, banPhase, banPhase || draft.SelectingTeamId == localTeamId);
+        if (CurrentLegendDraft?.State != prompt.State || CurrentLegendDraft?.IsBanPhase != prompt.IsBanPhase ||
+            CurrentLegendDraft?.IsLocalSelector != prompt.IsLocalSelector ||
+            !CurrentLegendDraft.AvailableCharacters.SequenceEqual(prompt.AvailableCharacters))
+        {
+            CurrentLegendDraft = prompt;
+            LegendDraftChanged?.Invoke(prompt);
+        }
+    }
+
+    private bool TryStartP2PDraft(IReadOnlyList<EntertainmentRoomMember> members)
+    {
+        if (_lobby is null || GetLobby(StateKey) != "draft_ban")
+            return false;
+        var players = members.Where(x => x.Team is 1 or 2).OrderBy(x => x.Team).ToArray();
+        if (players.Length != 2)
+            return false;
+        var bans = players.Select(x => MemberData(x.PlayerId, MemberBansKey)).ToArray();
+        var values = new string[2][];
+        var pendingDraft = ReadDraft();
+        var timedOut = pendingDraft?.SelectionDeadline is { } deadline && DateTimeOffset.UtcNow >= deadline;
+        for (var i = 0; i < bans.Length; i++)
+        {
+            try { values[i] = JsonSerializer.Deserialize<string[]>(bans[i], Json) ?? Array.Empty<string>(); }
+            catch { values[i] = Array.Empty<string>(); }
+            if (values[i].Length != 2 || values[i].Any(x => !Characters.Contains(x, StringComparer.Ordinal)))
+            {
+                if (!timedOut)
+                    return false;
+                var shuffled = Characters.OrderBy(_ => System.Security.Cryptography.RandomNumberGenerator.GetInt32(int.MaxValue)).Take(2).ToArray();
+                values[i] = shuffled;
+            }
+        }
+        var draft = new LegendDraftState(values[0][0], values[0][1], values[1][0], values[1][1],
+            Array.Empty<string>(), null, null, 1, 0, 0, DateTimeOffset.UtcNow.AddSeconds(RaceRules.LegendPickSeconds));
+        var available = AvailableCharacters(draft, 1);
+        if (available.Count == 0)
+            return false;
+        var selected = available[System.Security.Cryptography.RandomNumberGenerator.GetInt32(available.Count)];
+        draft = draft with { SelectedCharacter = selected };
+        var rules = ReadRules() with { Seed = DomainSeriesSeed(ReadRules(), 1), RandomSeed = false };
+        SetLobby(DraftKey, JsonSerializer.Serialize(draft, Json));
+        SetLobby(RulesKey, JsonSerializer.Serialize(rules, Json));
+        SetLobby(SharedCharacterKey, selected);
+        SetLobby(StartedAtKey, DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds().ToString());
+        SetLobby(StateKey, "launching");
+        CurrentMatch = null;
+        MatchChanged?.Invoke(null);
+        return true;
+    }
+
+    private bool TryStartP2PPick(IReadOnlyList<EntertainmentRoomMember> members)
+    {
+        if (_lobby is null || GetLobby(StateKey) != "draft_pick" || ReadDraft() is not { } draft || string.IsNullOrWhiteSpace(draft.SelectingTeamId))
+            return false;
+        var selectorTeam = draft.SelectingTeamId.EndsWith("team2", StringComparison.Ordinal) ? 2 : 1;
+        var selector = members.FirstOrDefault(x => x.Team == selectorTeam);
+        if (selector is null)
+            return false;
+        var requested = MemberData(selector.PlayerId, MemberPickKey);
+        var available = AvailableCharacters(draft, draft.GameNumber);
+        if (available.Count == 0)
+            return false;
+        if (!available.Contains(requested, StringComparer.Ordinal) &&
+            (draft.SelectionDeadline is not { } deadline || DateTimeOffset.UtcNow < deadline))
+            return false;
+        var selected = available.Contains(requested, StringComparer.Ordinal)
+            ? requested
+            : available[System.Security.Cryptography.RandomNumberGenerator.GetInt32(available.Count)];
+        var rules = ReadRules() with { Seed = DomainSeriesSeed(ReadRules(), draft.GameNumber), RandomSeed = false };
+        SetLobby(DraftKey, JsonSerializer.Serialize(draft with { SelectedCharacter = selected }, Json));
+        SetLobby(RulesKey, JsonSerializer.Serialize(rules, Json));
+        SetLobby(SharedCharacterKey, selected);
+        SetLobby(StartedAtKey, DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds().ToString());
+        SetLobby(StateKey, "launching");
+        CurrentMatch = null;
+        MatchChanged?.Invoke(null);
+        return true;
+    }
+
+    private string DomainSeriesSeed(RaceRuleSet rules, int gameNumber) =>
+        rules.SeriesSeeds is { Count: > 0 } && gameNumber <= rules.SeriesSeeds.Count && !string.IsNullOrWhiteSpace(rules.SeriesSeeds[gameNumber - 1])
+            ? rules.SeriesSeeds[gameNumber - 1]
+            : gameNumber == 1 && !string.IsNullOrWhiteSpace(rules.Seed)
+                ? rules.Seed
+            : System.Security.Cryptography.RandomNumberGenerator.GetHexString(8);
+
+    private static List<string> AvailableCharacters(LegendDraftState draft, int game)
+    {
+        var blocked = new HashSet<string>(StringComparer.Ordinal) { draft.PlayerOneBanOne, draft.PlayerTwoBanOne };
+        if (game == 1)
+        {
+            blocked.Add(draft.PlayerOneBanTwo);
+            blocked.Add(draft.PlayerTwoBanTwo);
+        }
+        foreach (var used in draft.UsedCharacters) blocked.Add(used);
+        return Characters.Where(x => !blocked.Contains(x)).ToList();
+    }
+
+    private async void ScheduleDraftTimeout(string gameId, string phase)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(RaceRules.LegendPickSeconds + 1));
+        if (_lobby is null || GetLobby(GameKey) != gameId || GetLobby(StateKey) != phase)
+            return;
+        Callable.From(RefreshFromSteam).CallDeferred();
     }
 
     private async Task PrepareLocalTeamLobbyAsync()
@@ -466,6 +694,13 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         var roster = ReadRoster();
         if (roster.Length == 0 || roster.Any(x => MemberData(x.PlayerId, MemberSeriesReadyKey) != gameId))
             return;
+        if (ReadRules().TeamSize == TeamSize.One && ReadRules().BestOf == 3 && ReadDraft() is { SelectingTeamId.Length: > 0 })
+        {
+            SetLobby(StateKey, "draft_pick");
+            ScheduleDraftTimeout(gameId, "draft_pick");
+            RefreshFromSteam();
+            return;
+        }
         SetLobby(StartedAtKey, DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds().ToString());
         SetLobby(StateKey, ReadRules().TeamSize == TeamSize.One ? "launching" : "preparing_team_lobbies");
         RefreshFromSteam();
@@ -586,10 +821,31 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         }
 
         SetLobby(SeriesGamesKey, JsonSerializer.Serialize(games, Json));
-        var rules = ReadRules() with { Seed = System.Security.Cryptography.RandomNumberGenerator.GetHexString(8), RandomSeed = false };
+        var rules = ReadRules();
+        var nextGame = games.Count + 1;
+        rules = rules with { Seed = DomainSeriesSeed(rules, nextGame), RandomSeed = false };
         SetLobby(RulesKey, JsonSerializer.Serialize(rules, Json));
         SetLobby(GameKey, $"{GetLobby(SessionKey)}-g{games.Count + 1}-{System.Security.Cryptography.RandomNumberGenerator.GetHexString(3)}");
         SetLobby(StartedAtKey, "0");
+        if (rules.TeamSize == TeamSize.One && ReadDraft() is { } draft)
+        {
+            var draftFirstWins = games.Count(x => x.WinnerTeamId.EndsWith("team1", StringComparison.Ordinal));
+            var draftSecondWins = games.Count(x => x.WinnerTeamId.EndsWith("team2", StringComparison.Ordinal));
+            var losingTeam = winner.EndsWith("team1", StringComparison.Ordinal) ? $"{GetLobby(SessionKey)}-team2" : $"{GetLobby(SessionKey)}-team1";
+            var used = draft.UsedCharacters.Append(GetLobby(SharedCharacterKey)).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).ToArray();
+            draft = draft with
+            {
+                UsedCharacters = used,
+                SelectedCharacter = null,
+                SelectingTeamId = losingTeam,
+                GameNumber = nextGame,
+                PlayerOneWins = draftFirstWins,
+                PlayerTwoWins = draftSecondWins,
+                SelectionDeadline = DateTimeOffset.UtcNow.AddSeconds(RaceRules.LegendPickSeconds)
+            };
+            SetLobby(DraftKey, JsonSerializer.Serialize(draft, Json));
+            SetLobby(SharedCharacterKey, string.Empty);
+        }
         SetLobby(StateKey, "series_intermission");
         RefreshFromSteam();
     }
@@ -638,6 +894,80 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         value.Floor, value.FloorEnteredAtMilliseconds, value.CompletedAtMilliseconds, value.RestartCount, value.EventSlUsed, value.CombatSlUsed);
     private static bool Terminal(ProgressCheckpoint value) => value.FinalBossDefeated ||
         value.Outcome is ParticipantOutcome.Finished or ParticipantOutcome.ScoreLocked or ParticipantOutcome.Surrendered or ParticipantOutcome.Forfeited or ParticipantOutcome.TimedOut;
+
+    private void ApplySwapPlan(IReadOnlyList<EntertainmentRoomMember> members)
+    {
+        if (_lobby is null)
+            return;
+        var encoded = GetLobby(SwapPlanKey);
+        if (string.IsNullOrWhiteSpace(encoded) || encoded == _appliedSwapPlan)
+            return;
+        TeamSwapPlan? plan;
+        try { plan = JsonSerializer.Deserialize<TeamSwapPlan>(encoded, Json); }
+        catch { return; }
+        if (plan is null)
+            return;
+        var localId = SteamUser.GetSteamID().m_SteamID.ToString();
+        var target = plan.FirstPlayerId == localId ? plan.FirstTargetTeam :
+            plan.SecondPlayerId == localId ? plan.SecondTargetTeam : 0;
+        _appliedSwapPlan = encoded;
+        if (target == 0 || members.All(x => x.PlayerId != localId))
+            return;
+        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberTeamKey, target.ToString());
+        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberReadyKey, "0");
+        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberSwapRequestKey, string.Empty);
+    }
+
+    private bool TryProcessTeamSwap(IReadOnlyList<EntertainmentRoomMember> members)
+    {
+        if (_lobby is null || GetLobby(StateKey) != "waiting")
+            return false;
+        var existing = GetLobby(SwapPlanKey);
+        if (!string.IsNullOrWhiteSpace(existing))
+        {
+            try
+            {
+                var plan = JsonSerializer.Deserialize<TeamSwapPlan>(existing, Json);
+                if (plan is not null && members.Any(x => x.PlayerId == plan.FirstPlayerId && x.Team == plan.FirstTargetTeam) &&
+                    members.Any(x => x.PlayerId == plan.SecondPlayerId && x.Team == plan.SecondTargetTeam))
+                {
+                    SetLobby(SwapPlanKey, string.Empty);
+                    return true;
+                }
+            }
+            catch { SetLobby(SwapPlanKey, string.Empty); }
+            return false;
+        }
+        foreach (var member in members)
+        {
+            var encoded = MemberData(member.PlayerId, MemberSwapRequestKey);
+            if (string.IsNullOrWhiteSpace(encoded))
+                continue;
+            TeamSwapRequest? request;
+            try { request = JsonSerializer.Deserialize<TeamSwapRequest>(encoded, Json); }
+            catch { continue; }
+            if (request is null || request.PlayerId != member.PlayerId || request.TargetTeam != 3-member.Team)
+                continue;
+            var counterpart = members.LastOrDefault(x => x.Team == request.TargetTeam && x.PlayerId != request.PlayerId);
+            if (counterpart is null)
+                continue;
+            var plan = new TeamSwapPlan(Guid.NewGuid().ToString("N"), request.PlayerId, request.TargetTeam,
+                counterpart.PlayerId, member.Team);
+            SetLobby(SwapPlanKey, JsonSerializer.Serialize(plan, Json));
+            return true;
+        }
+        return false;
+    }
+
+    private LegendDraftState? ReadDraft()
+    {
+        try
+        {
+            var encoded = GetLobby(DraftKey);
+            return string.IsNullOrWhiteSpace(encoded) ? null : JsonSerializer.Deserialize<LegendDraftState>(encoded, Json);
+        }
+        catch { return null; }
+    }
 
     private RaceRuleSet ReadRules()
     {
@@ -689,6 +1019,9 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberGameLobbyKey, string.Empty);
         SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberProgressKey, string.Empty);
         SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberSeriesReadyKey, string.Empty);
+        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberBansKey, string.Empty);
+        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberPickKey, string.Empty);
+        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberSwapRequestKey, string.Empty);
     }
 
     private int ChooseBalancedTeam()
@@ -726,6 +1059,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         _appliedSettlement = string.Empty;
         _localProgress = null;
         _seriesPreparingGameId = string.Empty;
+        _appliedSwapPlan = string.Empty;
         CurrentRoom = null;
         CurrentMatch = null;
         CurrentSettlement = null;
@@ -744,6 +1078,8 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
 
     private sealed record SettlementWire(string WinnerTeamId, FinishReason Reason, SettlementSide First,
         SettlementSide Second, string AuditDetail, DateTimeOffset CompletedAt, IReadOnlyList<LegendGameResult>? SeriesGames = null);
+    private sealed record TeamSwapRequest(string PlayerId, int TargetTeam);
+    private sealed record TeamSwapPlan(string Token, string FirstPlayerId, int FirstTargetTeam, string SecondPlayerId, int SecondTargetTeam);
 }
 
 [HarmonyPatch(typeof(SteamJoinCallbackHandler), "OnSteamLobbyJoinRequested")]

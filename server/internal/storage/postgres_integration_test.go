@@ -56,6 +56,10 @@ func TestRankedSettlementPersistsProfileHistoryAndLeaderboard(t *testing.T) {
 		First:       domain.SettlementSide{TeamID: a.FirstTeamID, Outcome: domain.OutcomeFinished, HighestFloor: 51, HighestFloorEnteredMS: winnerTime, CompletionMS: &winnerTime},
 		Second:      domain.SettlementSide{TeamID: a.SecondTeamID, Outcome: domain.OutcomeScoreLocked, HighestFloor: 38, HighestFloorEnteredMS: 1_900_000},
 		CompletedAt: time.Now().UTC(),
+		SeriesGames: []domain.LegendGame{
+			{GameNumber: 1, GameID: "g1", CharacterID: "Ironclad", WinnerTeamID: a.FirstTeamID, Reason: domain.ReasonBossCompletion, ElapsedMS: winnerTime},
+			{GameNumber: 2, GameID: "g2", CharacterID: "Silent", WinnerTeamID: a.FirstTeamID, Reason: domain.ReasonHighestFloor, ElapsedMS: 2_600_000},
+		},
 	}
 	deltas, err := store.ApplyRatings(ctx, a, a.FirstTeamID)
 	if err != nil {
@@ -90,7 +94,8 @@ func TestRankedSettlementPersistsProfileHistoryAndLeaderboard(t *testing.T) {
 	}
 	if len(history) != 1 || !history[0].Victory || history[0].RatingDelta != 25 || history[0].RunTimeMS != winnerTime ||
 		!history[0].Completed || history[0].HighestFloor != 51 || history[0].OpponentCompleted || history[0].OpponentHighestFloor != 38 ||
-		len(history[0].OpponentNames) != 1 || history[0].OpponentNames[0] != "Integration Loser" || history[0].Character != "Ironclad" {
+		len(history[0].OpponentNames) != 1 || history[0].OpponentNames[0] != "Integration Loser" || history[0].Character != "Ironclad" ||
+		history[0].LocalTeamID != a.FirstTeamID || len(history[0].SeriesGames) != 2 || history[0].SeriesGames[1].CharacterID != "Silent" {
 		t.Fatalf("winner history mismatch: %+v", history)
 	}
 	loserHistory, err := store.History(ctx, loserID, 5)
@@ -123,4 +128,77 @@ func TestRankedSettlementPersistsProfileHistoryAndLeaderboard(t *testing.T) {
 	if !found {
 		t.Fatal(fmt.Sprintf("winner %s was missing from leaderboard", winnerID))
 	}
+}
+
+func TestFullEntertainmentRoomSwapsTeamsAndRejectsShrink(t *testing.T) {
+	databaseURL := os.Getenv("RACE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("RACE_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	store, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	suffix := time.Now().UTC().Format("150405000000000")
+	code := "S" + suffix[len(suffix)-5:]
+	players := []string{"room-host-" + suffix, "room-b-" + suffix, "room-c-" + suffix, "room-d-" + suffix}
+	defer func() {
+		_, _ = store.Pool.Exec(ctx, `DELETE FROM entertainment_rooms WHERE code=$1`, code)
+		_, _ = store.Pool.Exec(ctx, `DELETE FROM players WHERE id=ANY($1)`, players)
+	}()
+	for _, player := range players {
+		if err := store.UpsertPlayer(ctx, player, player); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rules := domain.Rules{TeamSize: 2, Ascension: 3, TimeLimitMS: domain.MaxMatchMilliseconds, BestOf: 3}
+	if err := store.CreateRoom(ctx, code, players[0], rules); err != nil {
+		t.Fatal(err)
+	}
+	for _, player := range players[1:] {
+		if _, err := store.JoinRoom(ctx, code, player); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := store.RoomSnapshot(ctx, code)
+	if err != nil || len(before.Members) != 4 {
+		t.Fatalf("room did not fill: %+v %v", before, err)
+	}
+	after, err := store.SwitchRoomTeam(ctx, code, players[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	teamOf := func(id string) int {
+		for _, member := range after.Members {
+			if member.PlayerID == id {
+				return member.Team
+			}
+		}
+		return 0
+	}
+	if teamOf(players[0]) != 2 || len(after.Members) != 4 ||
+		len(filterRoomTeam(after.Members, 1)) != 2 || len(filterRoomTeam(after.Members, 2)) != 2 {
+		t.Fatalf("full-room team exchange failed: %+v", after.Members)
+	}
+	if _, err := store.UpdateRoomRules(ctx, code, players[0], rulesWithTeamSize(rules, 1)); err == nil {
+		t.Fatal("room size was reduced below the current team population")
+	}
+}
+
+func filterRoomTeam(members []EntertainmentRoomMember, team int) []EntertainmentRoomMember {
+	result := make([]EntertainmentRoomMember, 0, len(members))
+	for _, member := range members {
+		if member.Team == team {
+			result = append(result, member)
+		}
+	}
+	return result
+}
+
+func rulesWithTeamSize(rules domain.Rules, size int) domain.Rules {
+	rules.TeamSize = size
+	return rules
 }

@@ -35,11 +35,29 @@ public static class RaceRules
         Seed = "FUN-RACE",
         RandomSeed = true,
         AllowDuplicateCharacters = true,
+        CharacterPolicy = "host_for_1v1",
+        VictoryRule = "certified_race",
         TimeLimitMinutes = 180,
         Visibility = "friends",
-        Modifiers = ["Draft", "Hoarder"],
+        Modifiers = Array.Empty<string>(),
         CoordinationMode = "p2p"
     };
+
+    public static RaceRuleSet NormalizeEntertainment(RaceRuleSet rules)
+    {
+        var seeds = rules.SeriesSeeds?.Select(x => x?.Trim() ?? string.Empty).Take(3).ToArray()
+            ?? Array.Empty<string>();
+        return rules with
+        {
+            AllowDuplicateCharacters = true,
+            CharacterPolicy = "host_for_1v1",
+            VictoryRule = "certified_race",
+            AllowSpectators = false,
+            Modifiers = rules.Modifiers?.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+                ?? Array.Empty<string>(),
+            SeriesSeeds = seeds
+        };
+    }
 
     public static int SelectCasualAscension(Random random) =>
         random.Next(CasualMinAscension, CasualMaxAscension + 1);
@@ -88,11 +106,13 @@ public static class RaceRules
             throw new ArgumentOutOfRangeException(nameof(rules.Ascension));
         if (rules.TimeLimitMinutes is < 15 or > 360)
             throw new ArgumentOutOfRangeException(nameof(rules.TimeLimitMinutes));
-        if (!rules.RandomSeed && string.IsNullOrWhiteSpace(rules.Seed))
+        if (!rules.RandomSeed && string.IsNullOrWhiteSpace(rules.Seed) && rules.BestOf != 3)
             throw new ArgumentException("A fixed seed cannot be empty.", nameof(rules));
         if (rules.EventSlLimit is < 0 or > 9 || rules.CombatSlLimit is < 0 or > 9)
             throw new ArgumentOutOfRangeException(nameof(rules), "SL limits must be between 0 and 9.");
         if (rules.BestOf is not 1 and not 3)
             throw new ArgumentOutOfRangeException(nameof(rules), "Series length must be BO1 or BO3.");
+        if (rules.SeriesSeeds is { Count: > 3 })
+            throw new ArgumentException("A series may define at most three seeds.", nameof(rules));
     }
 }

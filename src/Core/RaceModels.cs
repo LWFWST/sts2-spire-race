@@ -160,7 +160,8 @@ public sealed record RaceRuleSet(
     int EventSlLimit = 3,
     int CombatSlLimit = 3,
     string CoordinationMode = "server",
-    int BestOf = 1);
+    int BestOf = 1,
+    IReadOnlyList<string>? SeriesSeeds = null);
 
 public sealed record QueueRequest(
     QueueKind Kind,
@@ -327,7 +328,9 @@ public sealed record MatchHistoryEntry(
     bool OpponentCompleted = false,
     int OpponentHighestFloor = 0,
     IReadOnlyList<string>? OpponentNames = null,
-    IReadOnlyList<string>? OpponentCharacters = null);
+    IReadOnlyList<string>? OpponentCharacters = null,
+    IReadOnlyList<LegendGameResult>? SeriesGames = null,
+    string LocalTeamId = "");
 
 public sealed record PlayerProfile(
     string Id,

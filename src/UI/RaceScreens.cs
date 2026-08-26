@@ -318,13 +318,17 @@ public static class RaceScreens
 
     private static void RenderLegendDraft(RacePage page, IRaceMatchService? service)
     {
+        var entertainmentDraft = service?.CurrentMatch?.Kind == QueueKind.Entertainment ||
+            page.Controller.CurrentEntertainmentRoom?.Rules is { BestOf: 3 };
         if (service?.CurrentLegendDraft is not { } prompt)
         {
-            BuildCenteredState(page, RaceTextCatalog.Get("legend.waiting"), "◆", null, null);
+            BuildCenteredState(page, RaceTextCatalog.Get(entertainmentDraft ? "fun.bo3.waiting" : "legend.waiting"), "◆", null, null);
             return;
         }
         page.Content.AddChild(RaceUiAssets.Label(
-            RaceTextCatalog.Get(prompt.IsBanPhase ? "legend.ban.title" : "legend.pick.title"),
+            RaceTextCatalog.Get(prompt.IsBanPhase
+                ? entertainmentDraft ? "fun.bo3.ban.title" : "legend.ban.title"
+                : "legend.pick.title"),
             37, StsColors.gold, HorizontalAlignment.Center, true));
         page.Content.AddChild(RaceUiAssets.Label(
             RaceTextCatalog.Get(prompt.IsBanPhase ? "legend.ban.body" : "legend.pick.body"),
@@ -524,7 +528,7 @@ public static class RaceScreens
     {
         if (!IsAlive(page)) return;
         page.ClearContent();
-        var rules = page.Controller.EntertainmentRules;
+        var rules = RaceRules.NormalizeEntertainment(page.Controller.EntertainmentRules);
         var room = page.Controller.CurrentEntertainmentRoom;
         var canEdit = room is null || page.Controller.CanEditEntertainmentRules;
 
@@ -562,7 +566,8 @@ public static class RaceScreens
                     var characterButton = RaceUiAssets.Button(
                         (localMember.CharacterId == captured ? "◆ " : string.Empty) + CharacterName(captured),
                         () => _ = SetEntertainmentMemberAsync(page, captured, false), 17, new Vector2(170, 46));
-                    characterButton.SetEnabled(room.State == "waiting" && !localMember.IsReady);
+                    characterButton.SetEnabled(room.State == "waiting" && !localMember.IsReady &&
+                        (room.Rules.TeamSize != TeamSize.One || canEdit));
                     characterRow.AddChild(characterButton);
                 }
                 page.Content.AddChild(characterRow);
@@ -624,7 +629,9 @@ public static class RaceScreens
         AddRulesSection(root, RaceTextCatalog.Get("fun.section.room"));
         AddOption(root, RaceTextCatalog.Get("fun.team_size"), RaceTextCatalog.Get($"mode.{(int)rules.TeamSize}v{(int)rules.TeamSize}"), () =>
         {
-            var next = (int)rules.TeamSize % 4 + 1;
+            var minimum = room?.Members.GroupBy(x => x.Team).Select(x => x.Count()).DefaultIfEmpty(1).Max() ?? 1;
+            var next = (int)rules.TeamSize;
+            do { next = next % 4 + 1; } while (next < minimum);
             Apply(rules with { TeamSize = (TeamSize)next });
         }, page);
         AddOption(root, RaceTextCatalog.Get("fun.connection_mode"), RaceTextCatalog.Get(
@@ -662,14 +669,6 @@ public static class RaceScreens
         {
             Apply(rules with { Ascension = (rules.Ascension + 1) % (RaceRules.MaxAscension + 1) });
         }, page);
-        AddOption(root, RaceTextCatalog.Get("fun.duplicates"), OnOff(rules.AllowDuplicateCharacters), () =>
-        {
-            Apply(rules with { AllowDuplicateCharacters = !rules.AllowDuplicateCharacters });
-        }, page);
-        AddOption(root, RaceTextCatalog.Get("fun.character_policy"), RaceTextCatalog.Get(rules.CharacterPolicy == "free_pick" ? "fun.free_pick" : "fun.random_pick"), () =>
-        {
-            Apply(rules with { CharacterPolicy = rules.CharacterPolicy == "free_pick" ? "random_pick" : "free_pick" });
-        }, page);
         AddOption(root, RaceTextCatalog.Get("fun.timer"), RaceTextCatalog.Get(rules.TimerKind == "game_time" ? "fun.game_time" : "fun.real_time"), () =>
         {
             Apply(rules with { TimerKind = rules.TimerKind == "game_time" ? "real_time" : "game_time" });
@@ -688,11 +687,42 @@ public static class RaceScreens
         {
             Apply(rules with { CombatSlLimit = (rules.CombatSlLimit + 1) % 10 });
         }, page);
-        AddOption(root, RaceTextCatalog.Get("fun.victory_rule"), RaceTextCatalog.Get("fun.shared_time"), () => { }, page);
         AddOption(root, RaceTextCatalog.Get("fun.series_length"), RaceTextCatalog.Get(rules.BestOf == 3 ? "fun.bo3" : "fun.bo1"), () =>
         {
             Apply(rules with { BestOf = rules.BestOf == 3 ? 1 : 3 });
         }, page);
+
+        if (rules.BestOf == 3)
+        {
+            AddRulesSection(root, RaceTextCatalog.Get("fun.series_seeds"));
+            var seeds = (rules.SeriesSeeds ?? Array.Empty<string>()).ToList();
+            while (seeds.Count < 3) seeds.Add(string.Empty);
+            if (!rules.RandomSeed && string.IsNullOrWhiteSpace(seeds[0])) seeds[0] = rules.Seed;
+            for (var index = 0; index < 3; index++)
+            {
+                var capturedIndex = index;
+                var seedRow = OptionRow(RaceTextCatalog.Format("fun.series_seed", index + 1));
+                var seedInput = RaceUiAssets.LineEdit("RANDOM", seeds[index]);
+                seedInput.Editable = canEdit;
+                seedInput.TextChanged += text =>
+                {
+                    var nextSeeds = (page.Controller.EntertainmentRules.SeriesSeeds ?? Array.Empty<string>()).ToList();
+                    while (nextSeeds.Count < 3) nextSeeds.Add(string.Empty);
+                    nextSeeds[capturedIndex] = text.Trim();
+                    var next = RaceRules.NormalizeEntertainment(page.Controller.EntertainmentRules with
+                    {
+                        RandomSeed = false,
+                        Seed = nextSeeds[0],
+                        SeriesSeeds = nextSeeds
+                    });
+                    page.Controller.EntertainmentRules = next;
+                    if (room is not null && canEdit && page.Controller.Services is IRaceEntertainmentRoomService roomService)
+                        _ = UpdateEntertainmentRoomRulesAsync(page, roomService, next);
+                };
+                seedRow.AddChild(seedInput);
+                root.AddChild(seedRow);
+            }
+        }
 
         AddRulesSection(root, RaceTextCatalog.Get("fun.section.access"));
         AddOption(root, RaceTextCatalog.Get("fun.visibility"), RaceTextCatalog.Get($"fun.{rules.Visibility}"), () =>
@@ -959,19 +989,7 @@ public static class RaceScreens
             {
                 var line = $"{match.PlayedAt:MM-dd HH:mm}   {(match.Victory ? "WIN" : "LOSS"),-5}   {(int)match.TeamSize}v{(int)match.TeamSize}   {CharacterName(match.Character),-12}   {HistoryProgress(match.Completed, match.HighestFloor, match.RunTime)}   {match.RatingDelta:+#;-#;0}";
                 list.AddChild(RaceUiAssets.Button(line, () => page.Controller.OpenDetails(
-                    RaceTextCatalog.Get("profile.match_detail"),
-                    $"ID  {match.MatchId}",
-                    $"{(match.Victory ? "WIN" : "LOSS")}   ·   {(int)match.TeamSize}v{(int)match.TeamSize}",
-                    RaceTextCatalog.Format("profile.history.local", CharacterName(match.Character),
-                        HistoryProgress(match.Completed, match.HighestFloor, match.RunTime)),
-                    RaceTextCatalog.Format("profile.history.opponents",
-                        match.OpponentNames is { Count: > 0 } ? string.Join(" / ", match.OpponentNames) : RaceTextCatalog.Get("profile.history.unknown"),
-                        match.OpponentCharacters is { Count: > 0 }
-                            ? string.Join(" / ", match.OpponentCharacters.Select(CharacterName))
-                            : RaceTextCatalog.Get("profile.history.unknown")),
-                    RaceTextCatalog.Format("profile.history.enemy_progress",
-                        HistoryProgress(match.OpponentCompleted, match.OpponentHighestFloor, match.OpponentRunTime)),
-                    RaceTextCatalog.Format("result.rating", match.RatingDelta)), 19, new Vector2(0, 52)));
+                    RaceTextCatalog.Get("profile.match_detail"), HistoryDetails(match)), 19, new Vector2(0, 52)));
             }
             if (profile.RecentMatches.Count == 0)
                 list.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("profile.no_matches"), 20, StsColors.lightGray, HorizontalAlignment.Center));
@@ -1824,6 +1842,33 @@ public static class RaceScreens
         if (completed)
             return RaceTextCatalog.Format("profile.history.completed", RaceUiAssets.FormatTime(elapsed));
         return RaceTextCatalog.Format("profile.history.floor", highestFloor, RaceUiAssets.FormatTime(elapsed));
+    }
+
+    private static string[] HistoryDetails(MatchHistoryEntry match)
+    {
+        var paragraphs = new List<string>
+        {
+            $"ID  {match.MatchId}",
+            $"{(match.Victory ? "WIN" : "LOSS")}   ·   {(int)match.TeamSize}v{(int)match.TeamSize}",
+            RaceTextCatalog.Format("profile.history.local", CharacterName(match.Character),
+                HistoryProgress(match.Completed, match.HighestFloor, match.RunTime)),
+            RaceTextCatalog.Format("profile.history.opponents",
+                match.OpponentNames is { Count: > 0 } ? string.Join(" / ", match.OpponentNames) : RaceTextCatalog.Get("profile.history.unknown"),
+                match.OpponentCharacters is { Count: > 0 }
+                    ? string.Join(" / ", match.OpponentCharacters.Select(CharacterName))
+                    : RaceTextCatalog.Get("profile.history.unknown")),
+            RaceTextCatalog.Format("profile.history.enemy_progress",
+                HistoryProgress(match.OpponentCompleted, match.OpponentHighestFloor, match.OpponentRunTime)),
+            RaceTextCatalog.Format("result.rating", match.RatingDelta)
+        };
+        if (match.SeriesGames is { Count: > 0 })
+        {
+            paragraphs.Add("BO3");
+            paragraphs.AddRange(match.SeriesGames.Select(game =>
+                $"G{game.GameNumber}   {(game.WinnerTeamId == match.LocalTeamId ? RaceTextCatalog.Get("result.local_side") : RaceTextCatalog.Get("result.opponent_side"))}" +
+                $"   {CharacterName(game.CharacterId)}   {RaceRules.FormatElapsed(game.ElapsedMilliseconds)}   {SettlementReason(game.Reason)}"));
+        }
+        return paragraphs.ToArray();
     }
 
     private static string CharacterName(string id) => RaceTextCatalog.CurrentLanguage == "zhs" ? id switch
