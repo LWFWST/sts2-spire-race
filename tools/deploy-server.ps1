@@ -7,6 +7,7 @@ param(
     [string]$SshKeyPath = '',
     [string]$ProductionEnvFile = '',
     [string]$TlsSource = 'C:\CP\MCC2\spirerace.xyz_nginx',
+    [switch]$UseRemoteTls,
     [switch]$BuildImageRemotely
 )
 
@@ -29,9 +30,11 @@ if ($SshKeyPath) {
 
 $certificate = Join-Path $TlsSource 'spirerace.xyz_bundle.crt'
 $privateKey = Join-Path $TlsSource 'spirerace.xyz.key'
-foreach ($required in @($certificate, $privateKey)) {
-    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "Required TLS file not found: $required"
+if (-not $UseRemoteTls) {
+    foreach ($required in @($certificate, $privateKey)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Required TLS file not found: $required"
+        }
     }
 }
 if ($ProductionEnvFile -and -not (Test-Path -LiteralPath $ProductionEnvFile -PathType Leaf)) {
@@ -54,7 +57,10 @@ try {
 
     & ssh @sshOptions $target "sudo mkdir -p '$RemoteRoot/releases' '$RemoteRoot/shared/tls' '$RemoteRoot/backups' && sudo chown -R '$ServerUser':'$ServerUser' '$RemoteRoot'"
     if ($LASTEXITCODE -ne 0) { throw 'Failed to prepare the remote deployment directory.' }
-    $bulkUploads = @($archive, $certificate, $privateKey)
+    $bulkUploads = @($archive)
+    if (-not $UseRemoteTls) {
+        $bulkUploads += @($certificate, $privateKey)
+    }
     if (-not $BuildImageRemotely) {
         $bulkUploads += $imageArchive
     }
@@ -71,15 +77,16 @@ try {
     $imageDeployArgs = if ($BuildImageRemotely) { '' } else {
         "--prebuilt-image '$remoteImageArchive' --image-tag '$imageTag'"
     }
+    $tlsInstall = if ($UseRemoteTls) { '' } else {
+        "sudo install -m 0644 /tmp/spirerace.xyz_bundle.crt '$RemoteRoot/shared/tls/spirerace.xyz_bundle.crt' && sudo install -m 0600 /tmp/spirerace.xyz.key '$RemoteRoot/shared/tls/spirerace.xyz.key' &&"
+    }
     $remoteCommand = @"
 set -euo pipefail
 trap 'rm -f "$remoteArchive" "$remoteImageArchive" /tmp/spirerace.xyz_bundle.crt /tmp/spirerace.xyz.key /tmp/spire-race.env.production' EXIT
 release='$RemoteRoot/releases/$timestamp'
 mkdir -p "`$release"
 tar -xzf '$remoteArchive' -C "`$release"
-sudo install -m 0644 /tmp/spirerace.xyz_bundle.crt '$RemoteRoot/shared/tls/spirerace.xyz_bundle.crt'
-sudo install -m 0600 /tmp/spirerace.xyz.key '$RemoteRoot/shared/tls/spirerace.xyz.key'
-$envInstall sudo bash "`$release/deploy/deploy-server.sh" --release-dir "`$release" --root-dir '$RemoteRoot' $imageDeployArgs
+$tlsInstall $envInstall sudo bash "`$release/deploy/deploy-server.sh" --release-dir "`$release" --root-dir '$RemoteRoot' $imageDeployArgs
 "@
     & ssh @sshOptions $target $remoteCommand
     if ($LASTEXITCODE -ne 0) { throw 'Remote deployment failed.' }
