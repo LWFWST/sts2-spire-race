@@ -161,7 +161,9 @@ public sealed record RaceRuleSet(
     int CombatSlLimit = 3,
     string CoordinationMode = "server",
     int BestOf = 1,
-    IReadOnlyList<string>? SeriesSeeds = null);
+    IReadOnlyList<string>? SeriesSeeds = null,
+    string SlTimerMode = "continuous",
+    int SpectatorSlots = 0);
 
 public sealed record QueueRequest(
     QueueKind Kind,
@@ -184,7 +186,8 @@ public sealed record ServerClockSnapshot(
     long MatchStartedUnixMilliseconds,
     long ElapsedMilliseconds,
     long RoundTripMilliseconds,
-    bool IsSynchronized);
+    bool IsSynchronized,
+    bool IsPaused = false);
 
 public sealed record ProgressCheckpoint(
     string MatchId,
@@ -216,7 +219,8 @@ public sealed record LegendGameResult(
     string CharacterId,
     string WinnerTeamId,
     FinishReason Reason,
-    long ElapsedMilliseconds);
+    long ElapsedMilliseconds,
+    string GameId = "");
 
 public sealed record LegendDraftState(
     string PlayerOneBanOne,
@@ -286,6 +290,11 @@ public sealed record EntertainmentRoomMember(
     bool IsReady = false,
     string CharacterId = "Ironclad");
 
+public sealed record RaceSpectator(
+    string PlayerId,
+    string DisplayName,
+    int WatchingTeam = 1);
+
 public sealed record EntertainmentRoom(
     string Code,
     string HostPlayerId,
@@ -293,7 +302,33 @@ public sealed record EntertainmentRoom(
     IReadOnlyList<EntertainmentRoomMember> Members,
     DateTimeOffset CreatedAt,
     EntertainmentCoordinationMode CoordinationMode = EntertainmentCoordinationMode.Server,
-    string State = "waiting");
+    string State = "waiting",
+    IReadOnlyList<RaceSpectator>? Spectators = null);
+
+public sealed record RaceReplaySummary(
+    string MatchId,
+    string GameId,
+    string PlayerId,
+    string DisplayName,
+    string TeamId,
+    string RunId,
+    string CharacterId,
+    int EventCount,
+    bool Completed,
+    bool IsLive,
+    bool IsPublic,
+    DateTimeOffset UpdatedAt);
+
+public sealed record SpectatableRace(
+    string MatchId,
+    string GameId,
+    string PlayerId,
+    string DisplayName,
+    string CharacterId,
+    string Mode,
+    bool IsFriend,
+    bool IsLegendPublic,
+    DateTimeOffset UpdatedAt);
 
 public sealed record QueueSnapshot(
     QueueState State,

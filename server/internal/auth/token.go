@@ -114,10 +114,10 @@ type SteamVerifier struct {
 }
 
 func (v SteamVerifier) Verify(ctx context.Context, steamID, ticket string) error {
+	if v.AllowDev && steamID != "" && ticket == "development" {
+		return nil
+	}
 	if v.APIKey == "" {
-		if v.AllowDev && steamID != "" && ticket == "development" {
-			return nil
-		}
 		return errors.New("steam authentication is not configured")
 	}
 	q := url.Values{"key": {v.APIKey}, "appid": {v.AppID}, "ticket": {ticket}}

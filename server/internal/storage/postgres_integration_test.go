@@ -142,7 +142,7 @@ func TestFullEntertainmentRoomSwapsTeamsAndRejectsShrink(t *testing.T) {
 	}
 	defer store.Close()
 
-	suffix := time.Now().UTC().Format("150405000000000")
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	code := "S" + suffix[len(suffix)-5:]
 	players := []string{"room-host-" + suffix, "room-b-" + suffix, "room-c-" + suffix, "room-d-" + suffix}
 	defer func() {
@@ -185,6 +185,81 @@ func TestFullEntertainmentRoomSwapsTeamsAndRejectsShrink(t *testing.T) {
 	}
 	if _, err := store.UpdateRoomRules(ctx, code, players[0], rulesWithTeamSize(rules, 1)); err == nil {
 		t.Fatal("room size was reduced below the current team population")
+	}
+}
+
+func TestReplayCloudAndEntertainmentSpectatorPermissions(t *testing.T) {
+	databaseURL := os.Getenv("RACE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("RACE_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	store, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	code := "W" + suffix[len(suffix)-5:]
+	players := []string{"watch-host-" + suffix, "watch-rival-" + suffix, "watch-viewer-" + suffix, "watch-outsider-" + suffix}
+	matchID := "fun-" + code
+	defer func() {
+		_, _ = store.Pool.Exec(ctx, `DELETE FROM matches WHERE id=$1`, matchID)
+		_, _ = store.Pool.Exec(ctx, `DELETE FROM entertainment_rooms WHERE code=$1`, code)
+		_, _ = store.Pool.Exec(ctx, `DELETE FROM players WHERE id=ANY($1)`, players)
+	}()
+	for _, player := range players {
+		if err := store.UpsertPlayer(ctx, player, player); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rules := domain.Rules{TeamSize: 1, Seed: "WATCH", Ascension: 3, TimeLimitMS: domain.MaxMatchMilliseconds,
+		EventSLLimit: 3, CombatSLLimit: 3, CoordinationMode: "server", SpectatorSlots: 1}
+	if err := store.CreateRoom(ctx, code, players[0], rules); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.JoinRoom(ctx, code, players[1]); err != nil {
+		t.Fatal(err)
+	}
+	room, err := store.JoinRoomSpectator(ctx, code, players[2])
+	if err != nil || len(room.Spectators) != 1 {
+		t.Fatalf("spectator did not join: %+v %v", room.Spectators, err)
+	}
+	room, err = store.SetRoomSpectatorTarget(ctx, code, players[2], 2)
+	if err != nil || room.Spectators[0].WatchingTeam != 2 {
+		t.Fatalf("spectator target did not update: %+v %v", room.Spectators, err)
+	}
+	if _, err := store.JoinRoomSpectator(ctx, code, players[3]); err == nil {
+		t.Fatal("spectator capacity was not enforced")
+	}
+
+	a := domain.Assignment{MatchID: matchID, GameID: matchID + "-g1", GameVersion: "v0.111.0", Kind: domain.QueueEntertainment,
+		TeamSize: 1, FirstTeamID: "watch-team-a", SecondTeamID: "watch-team-b", FirstPlayerIDs: []string{players[0]},
+		SecondPlayerIDs: []string{players[1]}, Rules: rules}
+	if err := store.SaveMatch(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	bundle := []byte{'P', 'K', 3, 4, 1, 2, 3}
+	replay, err := store.UpsertReplay(ctx, ReplayRow{MatchID: matchID, GameID: a.GameID, PlayerID: players[0],
+		TeamID: a.FirstTeamID, RunID: "run-1", CharacterID: "Ironclad", EventCount: 4}, bundle)
+	if err != nil || !replay.IsLive {
+		t.Fatalf("live replay was not stored: %+v %v", replay, err)
+	}
+	live, err := store.SpectatableReplays(ctx, players[2])
+	if err != nil || len(live) != 1 || live[0].MatchID != matchID {
+		t.Fatalf("room spectator could not discover live replay: %+v %v", live, err)
+	}
+	listed, err := store.MatchReplays(ctx, players[2], matchID)
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("room spectator could not list both-side replays: %+v %v", listed, err)
+	}
+	downloaded, err := store.ReplayBundle(ctx, players[2], matchID, a.GameID, players[0])
+	if err != nil || string(downloaded) != string(bundle) {
+		t.Fatalf("room spectator could not download replay: %v %v", downloaded, err)
+	}
+	if _, err := store.ReplayBundle(ctx, players[3], matchID, a.GameID, players[0]); err == nil {
+		t.Fatal("unrelated player downloaded a private replay")
 	}
 }
 

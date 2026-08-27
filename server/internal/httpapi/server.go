@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -82,6 +83,10 @@ func (s *Server) routes() {
 	s.Mux.Handle("PUT /v1/profile", s.Tokens.Middleware(http.HandlerFunc(s.updateProfile)))
 	s.Mux.Handle("GET /v1/profile/{player}", s.Tokens.Middleware(http.HandlerFunc(s.playerProfile)))
 	s.Mux.Handle("GET /v1/history", s.Tokens.Middleware(http.HandlerFunc(s.history)))
+	s.Mux.Handle("POST /v1/replays/upload", s.Tokens.Middleware(http.HandlerFunc(s.uploadReplay)))
+	s.Mux.Handle("GET /v1/replays/match/{match}", s.Tokens.Middleware(http.HandlerFunc(s.matchReplays)))
+	s.Mux.Handle("GET /v1/replays/download", s.Tokens.Middleware(http.HandlerFunc(s.downloadReplay)))
+	s.Mux.Handle("GET /v1/replays/spectatable", s.Tokens.Middleware(http.HandlerFunc(s.spectatableReplays)))
 	s.Mux.Handle("GET /v1/leaderboard", s.Tokens.Middleware(http.HandlerFunc(s.leaderboard)))
 	s.Mux.Handle("GET /v1/friends", s.Tokens.Middleware(http.HandlerFunc(s.friends)))
 	s.Mux.Handle("GET /v1/players/search", s.Tokens.Middleware(http.HandlerFunc(s.searchPlayers)))
@@ -96,8 +101,78 @@ func (s *Server) routes() {
 	s.Mux.Handle("PUT /v1/rooms/{code}/member", s.Tokens.Middleware(http.HandlerFunc(s.updateRoomMember)))
 	s.Mux.Handle("POST /v1/rooms/{code}/start", s.Tokens.Middleware(http.HandlerFunc(s.startRoom)))
 	s.Mux.Handle("POST /v1/rooms/{code}/leave", s.Tokens.Middleware(http.HandlerFunc(s.leaveRoom)))
+	s.Mux.Handle("POST /v1/rooms/{code}/spectators", s.Tokens.Middleware(http.HandlerFunc(s.joinRoomSpectator)))
+	s.Mux.Handle("PUT /v1/rooms/{code}/spectators/me", s.Tokens.Middleware(http.HandlerFunc(s.updateRoomSpectator)))
+	s.Mux.Handle("POST /v1/rooms/{code}/spectators/leave", s.Tokens.Middleware(http.HandlerFunc(s.leaveRoomSpectator)))
 	s.Mux.HandleFunc("GET /v1/integrity/{version}", s.manifest)
 	s.Mux.Handle("POST /v1/integrity/verify", s.Tokens.Middleware(http.HandlerFunc(s.verifyIntegrity)))
+}
+
+const maxReplayBundleBytes = 64 << 20
+
+func (s *Server) uploadReplay(w http.ResponseWriter, r *http.Request) {
+	claims, _ := auth.FromContext(r.Context())
+	row := storage.ReplayRow{
+		MatchID: strings.TrimSpace(r.Header.Get("X-Replay-Match-Id")), GameID: strings.TrimSpace(r.Header.Get("X-Replay-Game-Id")),
+		PlayerID: claims.PlayerID, TeamID: strings.TrimSpace(r.Header.Get("X-Replay-Team-Id")),
+		RunID: strings.TrimSpace(r.Header.Get("X-Replay-Run-Id")), CharacterID: strings.TrimSpace(r.Header.Get("X-Replay-Character-Id")),
+		Completed: strings.EqualFold(r.Header.Get("X-Replay-Completed"), "true"),
+	}
+	row.EventCount, _ = strconv.Atoi(r.Header.Get("X-Replay-Event-Count"))
+	if row.MatchID == "" || row.GameID == "" || row.TeamID == "" || row.RunID == "" || row.EventCount < 0 {
+		writeError(w, http.StatusBadRequest, "invalid replay metadata")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxReplayBundleBytes)
+	bundle, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "replay bundle exceeds 64 MiB")
+		return
+	}
+	if len(bundle) < 4 || string(bundle[:2]) != "PK" {
+		writeError(w, http.StatusBadRequest, "replay bundle is not a zip archive")
+		return
+	}
+	stored, err := s.Store.UpsertReplay(r.Context(), row, bundle)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, stored)
+}
+
+func (s *Server) matchReplays(w http.ResponseWriter, r *http.Request) {
+	claims, _ := auth.FromContext(r.Context())
+	rows, err := s.Store.MatchReplays(r.Context(), claims.PlayerID, strings.TrimSpace(r.PathValue("match")))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (s *Server) downloadReplay(w http.ResponseWriter, r *http.Request) {
+	claims, _ := auth.FromContext(r.Context())
+	bundle, err := s.Store.ReplayBundle(r.Context(), claims.PlayerID, strings.TrimSpace(r.URL.Query().Get("match_id")),
+		strings.TrimSpace(r.URL.Query().Get("game_id")), strings.TrimSpace(r.URL.Query().Get("player_id")))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "replay is unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.spire-race.replay+zip")
+	w.Header().Set("Content-Length", strconv.Itoa(len(bundle)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(bundle)
+}
+
+func (s *Server) spectatableReplays(w http.ResponseWriter, r *http.Request) {
+	claims, _ := auth.FromContext(r.Context())
+	rows, err := s.Store.SpectatableReplays(r.Context(), claims.PlayerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -778,9 +853,12 @@ func (s *Server) leaveRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if before.HostPlayerID == claims.PlayerID {
-		ids := make([]string, 0, len(before.Members))
+		ids := make([]string, 0, len(before.Members)+len(before.Spectators))
 		for _, member := range before.Members {
 			ids = append(ids, member.PlayerID)
+		}
+		for _, spectator := range before.Spectators {
+			ids = append(ids, spectator.PlayerID)
 		}
 		s.Hub.Broadcast(ids, "entertainment_room_closed", map[string]string{"code": code})
 	} else if room, snapshotErr := s.Store.RoomSnapshot(r.Context(), code); snapshotErr == nil {
@@ -789,10 +867,55 @@ func (s *Server) leaveRoom(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"state": "left"})
 }
 
+func (s *Server) joinRoomSpectator(w http.ResponseWriter, r *http.Request) {
+	claims, _ := auth.FromContext(r.Context())
+	code := strings.ToUpper(r.PathValue("code"))
+	room, err := s.Store.JoinRoomSpectator(r.Context(), code, claims.PlayerID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	s.broadcastRoom(room)
+	writeJSON(w, http.StatusOK, room)
+}
+
+func (s *Server) updateRoomSpectator(w http.ResponseWriter, r *http.Request) {
+	claims, _ := auth.FromContext(r.Context())
+	var body struct {
+		Team int `json:"team"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	room, err := s.Store.SetRoomSpectatorTarget(r.Context(), strings.ToUpper(r.PathValue("code")), claims.PlayerID, body.Team)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	s.broadcastRoom(room)
+	writeJSON(w, http.StatusOK, room)
+}
+
+func (s *Server) leaveRoomSpectator(w http.ResponseWriter, r *http.Request) {
+	claims, _ := auth.FromContext(r.Context())
+	code := strings.ToUpper(r.PathValue("code"))
+	if err := s.Store.LeaveRoomSpectator(r.Context(), code, claims.PlayerID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if room, err := s.Store.RoomSnapshot(r.Context(), code); err == nil {
+		s.broadcastRoom(room)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"state": "left"})
+}
+
 func (s *Server) broadcastRoom(room storage.EntertainmentRoomSnapshot) {
-	ids := make([]string, 0, len(room.Members))
+	ids := make([]string, 0, len(room.Members)+len(room.Spectators))
 	for _, member := range room.Members {
 		ids = append(ids, member.PlayerID)
+	}
+	for _, spectator := range room.Spectators {
+		ids = append(ids, spectator.PlayerID)
 	}
 	s.Hub.Broadcast(ids, "entertainment_room_updated", room)
 }
@@ -963,7 +1086,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		switch header.Type {
 		case "heartbeat":
 			_ = s.Queue.TouchPresence(r.Context(), claims.PlayerID)
-			_ = s.Hub.Send(claims.PlayerID, "clock", map[string]int64{"server_unix_ms": time.Now().UnixMilli()})
+			_ = s.Hub.Send(claims.PlayerID, "clock", s.Matches.ClockForPlayer(claims.PlayerID))
 		case "party_open":
 			var body struct {
 				Kind     string `json:"kind"`

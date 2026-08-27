@@ -16,6 +16,122 @@ import (
 
 type Postgres struct{ Pool *pgxpool.Pool }
 
+type ReplayRow struct {
+	MatchID     string    `json:"match_id"`
+	GameID      string    `json:"game_id"`
+	PlayerID    string    `json:"player_id"`
+	DisplayName string    `json:"display_name"`
+	TeamID      string    `json:"team_id"`
+	RunID       string    `json:"run_id"`
+	CharacterID string    `json:"character_id"`
+	EventCount  int       `json:"event_count"`
+	Completed   bool      `json:"completed"`
+	IsLive      bool      `json:"is_live"`
+	IsPublic    bool      `json:"is_public"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type SpectatableReplayRow struct {
+	MatchID        string    `json:"match_id"`
+	GameID         string    `json:"game_id"`
+	PlayerID       string    `json:"player_id"`
+	DisplayName    string    `json:"display_name"`
+	CharacterID    string    `json:"character_id"`
+	Mode           string    `json:"mode"`
+	IsFriend       bool      `json:"is_friend"`
+	IsLegendPublic bool      `json:"is_legend_public"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+func (p *Postgres) UpsertReplay(ctx context.Context, row ReplayRow, bundle []byte) (ReplayRow, error) {
+	var allowed, public bool
+	err := p.Pool.QueryRow(ctx, `SELECT
+		EXISTS(SELECT 1 FROM match_participants WHERE match_id=$1 AND player_id=$2),
+		COALESCE((SELECT kind='ranked' AND COALESCE((payload->>'legend_series')::boolean,false) FROM matches WHERE id=$1),false)`,
+		row.MatchID, row.PlayerID).Scan(&allowed, &public)
+	if err != nil {
+		return ReplayRow{}, err
+	}
+	if !allowed {
+		return ReplayRow{}, errors.New("player is not a participant in this match")
+	}
+	row.IsPublic = public
+	err = p.Pool.QueryRow(ctx, `INSERT INTO race_replays(match_id,game_id,player_id,team_id,run_id,character_id,event_count,completed,is_public,bundle,completed_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,CASE WHEN $8 THEN now() ELSE NULL END)
+		ON CONFLICT(match_id,game_id,player_id) DO UPDATE SET
+		team_id=excluded.team_id,run_id=excluded.run_id,character_id=excluded.character_id,
+		event_count=GREATEST(race_replays.event_count,excluded.event_count),completed=race_replays.completed OR excluded.completed,
+		is_public=excluded.is_public,bundle=excluded.bundle,updated_at=now(),
+		completed_at=CASE WHEN race_replays.completed OR excluded.completed THEN COALESCE(race_replays.completed_at,now()) ELSE NULL END
+		RETURNING updated_at,completed,is_public`, row.MatchID, row.GameID, row.PlayerID, row.TeamID, row.RunID,
+		row.CharacterID, row.EventCount, row.Completed, row.IsPublic, bundle).Scan(&row.UpdatedAt, &row.Completed, &row.IsPublic)
+	row.IsLive = !row.Completed
+	return row, err
+}
+
+func (p *Postgres) MatchReplays(ctx context.Context, requesterID, matchID string) ([]ReplayRow, error) {
+	var authorized bool
+	if err := p.Pool.QueryRow(ctx, `SELECT
+		EXISTS(SELECT 1 FROM match_participants WHERE match_id=$1 AND player_id=$2) OR
+		EXISTS(SELECT 1 FROM entertainment_room_spectators WHERE ('fun-'||trim(code))=$1 AND player_id=$2)`,
+		matchID, requesterID).Scan(&authorized); err != nil {
+		return nil, err
+	}
+	rows, err := p.Pool.Query(ctx, `SELECT r.match_id,r.game_id,r.player_id,p.display_name,r.team_id,r.run_id,r.character_id,r.event_count,
+		r.completed,NOT r.completed,r.is_public,r.updated_at
+		FROM race_replays r JOIN players p ON p.id=r.player_id
+		WHERE r.match_id=$1 AND ($2 OR r.is_public) ORDER BY r.game_id,r.team_id,r.player_id`, matchID, authorized)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []ReplayRow{}
+	for rows.Next() {
+		var value ReplayRow
+		if err := rows.Scan(&value.MatchID, &value.GameID, &value.PlayerID, &value.DisplayName, &value.TeamID, &value.RunID,
+			&value.CharacterID, &value.EventCount, &value.Completed, &value.IsLive, &value.IsPublic, &value.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, rows.Err()
+}
+
+func (p *Postgres) ReplayBundle(ctx context.Context, requesterID, matchID, gameID, playerID string) ([]byte, error) {
+	var bundle []byte
+	err := p.Pool.QueryRow(ctx, `SELECT r.bundle FROM race_replays r WHERE r.match_id=$1 AND r.game_id=$2 AND r.player_id=$3 AND (
+		r.player_id=$4 OR r.is_public OR EXISTS(SELECT 1 FROM match_participants mp WHERE mp.match_id=r.match_id AND mp.player_id=$4) OR
+		EXISTS(SELECT 1 FROM friendships f WHERE f.state='accepted' AND ((f.requester_id=$4 AND f.addressee_id=r.player_id) OR (f.addressee_id=$4 AND f.requester_id=r.player_id))) OR
+		EXISTS(SELECT 1 FROM entertainment_room_spectators s WHERE ('fun-'||trim(s.code))=r.match_id AND s.player_id=$4))`,
+		matchID, gameID, playerID, requesterID).Scan(&bundle)
+	return bundle, err
+}
+
+func (p *Postgres) SpectatableReplays(ctx context.Context, requesterID string) ([]SpectatableReplayRow, error) {
+	rows, err := p.Pool.Query(ctx, `SELECT r.match_id,r.game_id,r.player_id,p.display_name,r.character_id,m.kind,
+		EXISTS(SELECT 1 FROM friendships f WHERE f.state='accepted' AND ((f.requester_id=$1 AND f.addressee_id=r.player_id) OR (f.addressee_id=$1 AND f.requester_id=r.player_id))),
+		r.is_public,r.updated_at
+		FROM race_replays r JOIN players p ON p.id=r.player_id JOIN matches m ON m.id=r.match_id
+		WHERE r.completed=false AND r.player_id<>$1 AND (r.is_public OR EXISTS(SELECT 1 FROM friendships f WHERE f.state='accepted' AND
+		((f.requester_id=$1 AND f.addressee_id=r.player_id) OR (f.addressee_id=$1 AND f.requester_id=r.player_id))) OR
+		EXISTS(SELECT 1 FROM entertainment_room_spectators s WHERE ('fun-'||trim(s.code))=r.match_id AND s.player_id=$1))
+		ORDER BY r.updated_at DESC LIMIT 100`, requesterID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []SpectatableReplayRow{}
+	for rows.Next() {
+		var value SpectatableReplayRow
+		if err := rows.Scan(&value.MatchID, &value.GameID, &value.PlayerID, &value.DisplayName, &value.CharacterID, &value.Mode,
+			&value.IsFriend, &value.IsLegendPublic, &value.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, rows.Err()
+}
+
 func (p *Postgres) Player(ctx context.Context, playerID string) (string, error) {
 	var displayName string
 	err := p.Pool.QueryRow(ctx, `SELECT display_name FROM players WHERE id=$1`, playerID).Scan(&displayName)
@@ -62,9 +178,12 @@ func (p *Postgres) UpsertPlayer(ctx context.Context, id, name string) error {
 
 func (p *Postgres) ActiveRoomForPlayer(ctx context.Context, playerID string) (EntertainmentRoomSnapshot, error) {
 	var code string
-	err := p.Pool.QueryRow(ctx, `SELECT m.code FROM entertainment_room_members m
-		JOIN entertainment_rooms r ON r.code=m.code
-		WHERE m.player_id=$1 AND r.closed_at IS NULL ORDER BY m.joined_at DESC LIMIT 1`, playerID).Scan(&code)
+	err := p.Pool.QueryRow(ctx, `SELECT active.code FROM (
+		SELECT m.code,m.joined_at FROM entertainment_room_members m WHERE m.player_id=$1
+		UNION ALL
+		SELECT s.code,s.joined_at FROM entertainment_room_spectators s WHERE s.player_id=$1
+	) active JOIN entertainment_rooms r ON r.code=active.code
+		WHERE r.closed_at IS NULL ORDER BY active.joined_at DESC LIMIT 1`, playerID).Scan(&code)
 	if err != nil {
 		return EntertainmentRoomSnapshot{}, err
 	}
@@ -554,15 +673,22 @@ type EntertainmentRoomMember struct {
 	CharacterID string `json:"character_id"`
 }
 
+type EntertainmentRoomSpectator struct {
+	PlayerID     string `json:"player_id"`
+	DisplayName  string `json:"display_name"`
+	WatchingTeam int    `json:"watching_team"`
+}
+
 type EntertainmentRoomSnapshot struct {
-	Code             string                    `json:"code"`
-	HostPlayerID     string                    `json:"host_player_id"`
-	Rules            domain.Rules              `json:"rules"`
-	Members          []EntertainmentRoomMember `json:"members"`
-	CreatedAt        time.Time                 `json:"created_at"`
-	CoordinationMode string                    `json:"coordination_mode"`
-	State            string                    `json:"state"`
-	StartedAt        *time.Time                `json:"started_at,omitempty"`
+	Code             string                       `json:"code"`
+	HostPlayerID     string                       `json:"host_player_id"`
+	Rules            domain.Rules                 `json:"rules"`
+	Members          []EntertainmentRoomMember    `json:"members"`
+	Spectators       []EntertainmentRoomSpectator `json:"spectators"`
+	CreatedAt        time.Time                    `json:"created_at"`
+	CoordinationMode string                       `json:"coordination_mode"`
+	State            string                       `json:"state"`
+	StartedAt        *time.Time                   `json:"started_at,omitempty"`
 }
 
 func (p *Postgres) RoomSnapshot(ctx context.Context, code string) (EntertainmentRoomSnapshot, error) {
@@ -591,7 +717,101 @@ func (p *Postgres) RoomSnapshot(ctx context.Context, code string) (Entertainment
 		}
 		room.Members = append(room.Members, member)
 	}
-	return room, rows.Err()
+	if err = rows.Err(); err != nil {
+		return room, err
+	}
+	spectatorRows, err := p.Pool.Query(ctx, `SELECT s.player_id,p.display_name,s.watching_team
+		FROM entertainment_room_spectators s JOIN players p ON p.id=s.player_id
+		WHERE s.code=$1 ORDER BY s.joined_at`, code)
+	if err != nil {
+		return room, err
+	}
+	defer spectatorRows.Close()
+	room.Spectators = []EntertainmentRoomSpectator{}
+	for spectatorRows.Next() {
+		var spectator EntertainmentRoomSpectator
+		if err = spectatorRows.Scan(&spectator.PlayerID, &spectator.DisplayName, &spectator.WatchingTeam); err != nil {
+			return room, err
+		}
+		room.Spectators = append(room.Spectators, spectator)
+	}
+	return room, spectatorRows.Err()
+}
+
+func (p *Postgres) JoinRoomSpectator(ctx context.Context, code, playerID string) (EntertainmentRoomSnapshot, error) {
+	tx, err := p.Pool.Begin(ctx)
+	if err != nil {
+		return EntertainmentRoomSnapshot{}, err
+	}
+	defer tx.Rollback(ctx)
+	var payload []byte
+	var mode string
+	if err = tx.QueryRow(ctx, `SELECT rules,coordination_mode FROM entertainment_rooms
+		WHERE code=$1 AND closed_at IS NULL FOR UPDATE`, code).Scan(&payload, &mode); err != nil {
+		return EntertainmentRoomSnapshot{}, err
+	}
+	var rules domain.Rules
+	if err = json.Unmarshal(payload, &rules); err != nil {
+		return EntertainmentRoomSnapshot{}, err
+	}
+	if mode == "p2p" {
+		return EntertainmentRoomSnapshot{}, errors.New("Steam P2P rooms do not provide server spectator seats")
+	}
+	if rules.SpectatorSlots <= 0 {
+		return EntertainmentRoomSnapshot{}, errors.New("this room has no spectator seats")
+	}
+	var member bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM entertainment_room_members WHERE code=$1 AND player_id=$2)`, code, playerID).Scan(&member); err != nil {
+		return EntertainmentRoomSnapshot{}, err
+	}
+	if member {
+		return EntertainmentRoomSnapshot{}, errors.New("players cannot also occupy a spectator seat")
+	}
+	var alreadySpectating bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM entertainment_room_spectators WHERE code=$1 AND player_id=$2)`, code, playerID).Scan(&alreadySpectating); err != nil {
+		return EntertainmentRoomSnapshot{}, err
+	}
+	if alreadySpectating {
+		if err = tx.Commit(ctx); err != nil {
+			return EntertainmentRoomSnapshot{}, err
+		}
+		return p.RoomSnapshot(ctx, code)
+	}
+	var count int
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM entertainment_room_spectators WHERE code=$1`, code).Scan(&count); err != nil {
+		return EntertainmentRoomSnapshot{}, err
+	}
+	if count >= rules.SpectatorSlots {
+		return EntertainmentRoomSnapshot{}, errors.New("spectator seats are full")
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO entertainment_room_spectators(code,player_id,watching_team)
+		VALUES($1,$2,1) ON CONFLICT(code,player_id) DO NOTHING`, code, playerID); err != nil {
+		return EntertainmentRoomSnapshot{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return EntertainmentRoomSnapshot{}, err
+	}
+	return p.RoomSnapshot(ctx, code)
+}
+
+func (p *Postgres) SetRoomSpectatorTarget(ctx context.Context, code, playerID string, team int) (EntertainmentRoomSnapshot, error) {
+	if team != 1 && team != 2 {
+		return EntertainmentRoomSnapshot{}, errors.New("spectator target must be team 1 or team 2")
+	}
+	tag, err := p.Pool.Exec(ctx, `UPDATE entertainment_room_spectators SET watching_team=$3
+		WHERE code=$1 AND player_id=$2`, code, playerID, team)
+	if err != nil {
+		return EntertainmentRoomSnapshot{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return EntertainmentRoomSnapshot{}, errors.New("player is not spectating this room")
+	}
+	return p.RoomSnapshot(ctx, code)
+}
+
+func (p *Postgres) LeaveRoomSpectator(ctx context.Context, code, playerID string) error {
+	_, err := p.Pool.Exec(ctx, `DELETE FROM entertainment_room_spectators WHERE code=$1 AND player_id=$2`, code, playerID)
+	return err
 }
 
 func (p *Postgres) JoinRoom(ctx context.Context, code, playerID string) (EntertainmentRoomSnapshot, error) {
@@ -624,6 +844,9 @@ func (p *Postgres) JoinRoom(ctx context.Context, code, playerID string) (Enterta
 		} else {
 			return room, errors.New("room is full")
 		}
+	}
+	if _, err = p.Pool.Exec(ctx, `DELETE FROM entertainment_room_spectators WHERE code=$1 AND player_id=$2`, code, playerID); err != nil {
+		return room, err
 	}
 	if _, err = p.Pool.Exec(ctx, `INSERT INTO entertainment_room_members(code,player_id,team) VALUES($1,$2,$3)`, code, playerID, team); err != nil {
 		return room, err

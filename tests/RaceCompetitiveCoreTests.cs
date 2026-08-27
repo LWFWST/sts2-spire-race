@@ -58,6 +58,24 @@ public sealed class RaceCompetitiveCoreTests
         Assert.Equal(expected, RaceRules.FormatElapsed(value));
 
     [Fact]
+    public void EntertainmentTimerAndSpectatorRulesAreNormalized()
+    {
+        var server = RaceRules.NormalizeEntertainment(RaceRules.EntertainmentDefault() with
+        {
+            CoordinationMode = "server",
+            SlTimerMode = "pause_on_save",
+            SpectatorSlots = 12
+        });
+        Assert.Equal("pause_on_save", server.SlTimerMode);
+        Assert.Equal(8, server.SpectatorSlots);
+        Assert.True(server.AllowSpectators);
+
+        var p2p = RaceRules.NormalizeEntertainment(server with { CoordinationMode = "p2p" });
+        Assert.Equal(0, p2p.SpectatorSlots);
+        Assert.False(p2p.AllowSpectators);
+    }
+
+    [Fact]
     public void EloAndVisibleRatingUseLockedConstants()
     {
         Assert.Equal(24, RaceRating.HiddenDelta(1500, 1500, true, 0, false));

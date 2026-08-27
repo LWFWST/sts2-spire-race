@@ -79,6 +79,19 @@ public interface IRaceEntertainmentRoomService
     Task<EntertainmentRoom> StartRoomAsync(CancellationToken cancellationToken = default);
     Task LeaveRoomAsync(CancellationToken cancellationToken = default);
     Task InviteFriendAsync(string playerId, CancellationToken cancellationToken = default);
+    Task<EntertainmentRoom> JoinSpectatorAsync(string code, CancellationToken cancellationToken = default) =>
+        Task.FromException<EntertainmentRoom>(new NotSupportedException("Spectating is not available for this room transport."));
+    Task<EntertainmentRoom> SetSpectatorTargetAsync(int team, CancellationToken cancellationToken = default) =>
+        Task.FromException<EntertainmentRoom>(new NotSupportedException("Spectating is not available for this room transport."));
+    Task LeaveSpectatorAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+}
+
+public interface IRaceReplayService
+{
+    Task UploadReplayAsync(RaceReplaySummary replay, byte[] bundle, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<RaceReplaySummary>> GetMatchReplaysAsync(string matchId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<SpectatableRace>> GetSpectatableRacesAsync(CancellationToken cancellationToken = default);
+    Task<byte[]> DownloadReplayAsync(string matchId, string gameId, string playerId, CancellationToken cancellationToken = default);
 }
 
 public interface IRacePartyService
@@ -139,7 +152,8 @@ public interface IRaceServices :
     IRaceProfileService,
     IRaceSocialService,
     IRaceLeaderboardService,
-    IRaceActivityService
+    IRaceActivityService,
+    IRaceReplayService
 {
     IRacePlatformIdentityProvider IdentityProvider { get; }
     IRaceSessionLauncher SessionLauncher { get; }

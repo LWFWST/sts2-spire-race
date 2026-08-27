@@ -34,14 +34,16 @@ func (f *fakeRepository) ApplyRatings(_ context.Context, _ domain.Assignment, _ 
 }
 
 type fakeNotifier struct {
-	mu     sync.Mutex
-	events []string
+	mu       sync.Mutex
+	events   []string
+	payloads []any
 }
 
-func (f *fakeNotifier) Broadcast(_ []string, event string, _ any) {
+func (f *fakeNotifier) Broadcast(_ []string, event string, payload any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.events = append(f.events, event)
+	f.payloads = append(f.payloads, payload)
 }
 
 func request(player string, kind domain.QueueKind, size int, tier string, members ...string) domain.QueueRequest {
@@ -203,6 +205,64 @@ func TestServiceSLIsChargedOnResumeAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestEntertainmentPauseOnSaveClockFreezesAndResumes(t *testing.T) {
+	service := New(&fakeRepository{}, nil)
+	now := time.Now().UnixMilli()
+	a := domain.Assignment{
+		MatchID: "fun-clock-pause", GameID: "fun-clock-pause", GameVersion: "v0.111.0", Kind: domain.QueueEntertainment,
+		TeamSize: 1, FirstTeamID: "team-a", SecondTeamID: "team-b", FirstPlayerIDs: []string{"a"}, SecondPlayerIDs: []string{"b"},
+		StartedAtMS: now - 10_000, Rules: domain.Rules{TeamSize: 1, Seed: "clock", Ascension: 3,
+			TimeLimitMS: domain.MaxMatchMilliseconds, EventSLLimit: 3, CombatSLLimit: 3, SLTimerMode: "pause_on_save"},
+	}
+	if err := service.CreateEntertainment(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SaveAndQuit("a", false, false); err != nil {
+		t.Fatal(err)
+	}
+	clock := service.ClockForPlayer("a")
+	if paused, _ := clock["paused"].(bool); !paused {
+		t.Fatalf("pause-on-save clock was not marked paused: %+v", clock)
+	}
+	service.mu.Lock()
+	pausedAt := service.matches[a.MatchID].PausedAtMS[a.FirstTeamID]
+	service.matches[a.MatchID].PausedAtMS[a.FirstTeamID] = pausedAt - 5_000
+	service.mu.Unlock()
+	if _, err := service.Resume("a", "clock-resume"); err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	pausedTotal := service.matches[a.MatchID].PausedTotalMS[a.FirstTeamID]
+	service.mu.Unlock()
+	if pausedTotal < 4_900 {
+		t.Fatalf("paused duration was not removed from elapsed time: %d", pausedTotal)
+	}
+	clock = service.ClockForPlayer("a")
+	if paused, _ := clock["paused"].(bool); paused {
+		t.Fatalf("resumed clock remained paused: %+v", clock)
+	}
+}
+
+func TestEntertainmentContinuousClockDoesNotPauseOnSave(t *testing.T) {
+	service := New(&fakeRepository{}, nil)
+	a := domain.Assignment{
+		MatchID: "fun-clock-strict", GameID: "fun-clock-strict", GameVersion: "v0.111.0", Kind: domain.QueueEntertainment,
+		TeamSize: 1, FirstTeamID: "team-a", SecondTeamID: "team-b", FirstPlayerIDs: []string{"a"}, SecondPlayerIDs: []string{"b"},
+		StartedAtMS: time.Now().UnixMilli() - 10_000, Rules: domain.Rules{TeamSize: 1, Seed: "clock", Ascension: 3,
+			TimeLimitMS: domain.MaxMatchMilliseconds, EventSLLimit: 3, CombatSLLimit: 3, SLTimerMode: "continuous"},
+	}
+	if err := service.CreateEntertainment(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SaveAndQuit("a", false, false); err != nil {
+		t.Fatal(err)
+	}
+	clock := service.ClockForPlayer("a")
+	if paused, _ := clock["paused"].(bool); paused {
+		t.Fatalf("strict clock paused during save and quit: %+v", clock)
+	}
+}
+
 func TestTeamSurrenderRequiresStrictMajority(t *testing.T) {
 	repo := &fakeRepository{}
 	service := New(repo, nil)
@@ -299,6 +359,11 @@ func TestEntertainmentBO3OnlySettlesAfterTwoGameWins(t *testing.T) {
 	}
 	if err := service.CreateEntertainment(context.Background(), a); err != nil {
 		t.Fatal(err)
+	}
+	draftPayload, ok := notify.payloads[len(notify.payloads)-1].(map[string]any)
+	draftAssignment, assignmentOK := draftPayload["assignment"].(domain.Assignment)
+	if !ok || !assignmentOK || draftAssignment.MatchID != a.MatchID {
+		t.Fatalf("entertainment BO3 draft did not include its launch assignment: %#v", notify.payloads)
 	}
 	if err := service.SubmitLegendBans(context.Background(), "a", "Ironclad", "Silent"); err != nil {
 		t.Fatal(err)

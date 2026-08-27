@@ -44,6 +44,8 @@ type state struct {
 	SeriesGames    []domain.LegendGame
 	Settled        bool
 	SteamLobbyIDs  map[string]string
+	PausedAtMS     map[string]int64
+	PausedTotalMS  map[string]int64
 }
 
 func New(repo Repository, notifier Notifier) *Service {
@@ -85,7 +87,7 @@ func (s *Service) Create(ctx context.Context, first, second domain.QueueRequest)
 	if len(a.SecondPlayerIDs) > 0 {
 		a.SecondSteamHostPlayerID = a.SecondPlayerIDs[0]
 	}
-	st := &state{Assignment: a, Confirmed: map[string]bool{}, Ready: map[string]bool{}, Progress: map[string]domain.Progress{}, Idempotency: map[string]bool{}, SurrenderVotes: map[string]map[string]bool{}, PendingSL: map[string]bool{}, ForcedReasons: map[string]domain.FinishReason{}, Bans: map[string][2]string{}, SteamLobbyIDs: map[string]string{}}
+	st := &state{Assignment: a, Confirmed: map[string]bool{}, Ready: map[string]bool{}, Progress: map[string]domain.Progress{}, Idempotency: map[string]bool{}, SurrenderVotes: map[string]map[string]bool{}, PendingSL: map[string]bool{}, ForcedReasons: map[string]domain.FinishReason{}, Bans: map[string][2]string{}, SteamLobbyIDs: map[string]string{}, PausedAtMS: map[string]int64{}, PausedTotalMS: map[string]int64{}}
 	s.mu.Lock()
 	s.matches[matchID] = st
 	for _, p := range append(append([]string{}, a.FirstPlayerIDs...), a.SecondPlayerIDs...) {
@@ -129,7 +131,8 @@ func (s *Service) CreateEntertainment(ctx context.Context, a domain.Assignment) 
 	}
 	st := &state{Assignment: a, Confirmed: map[string]bool{}, Ready: map[string]bool{}, Progress: map[string]domain.Progress{},
 		Idempotency: map[string]bool{}, SurrenderVotes: map[string]map[string]bool{}, PendingSL: map[string]bool{},
-		ForcedReasons: map[string]domain.FinishReason{}, Bans: map[string][2]string{}, SteamLobbyIDs: map[string]string{}}
+		ForcedReasons: map[string]domain.FinishReason{}, Bans: map[string][2]string{}, SteamLobbyIDs: map[string]string{},
+		PausedAtMS: map[string]int64{}, PausedTotalMS: map[string]int64{}}
 	s.mu.Lock()
 	s.matches[a.MatchID] = st
 	for _, playerID := range allPlayers(a) {
@@ -139,7 +142,7 @@ func (s *Service) CreateEntertainment(ctx context.Context, a domain.Assignment) 
 	s.mu.Unlock()
 	if a.LegendSeries {
 		if notifier != nil {
-			notifier.Broadcast(allPlayers(a), "legend_ban_required", map[string]any{"available_characters": domain.Characters, "draft": domain.LegendDraft{GameNumber: 1}})
+			notifier.Broadcast(allPlayers(a), "legend_ban_required", map[string]any{"available_characters": domain.Characters, "draft": domain.LegendDraft{GameNumber: 1}, "assignment": a})
 		}
 		time.AfterFunc(domain.LegendPickWindow, func() { s.autoLegendBans(a.MatchID) })
 	} else {
@@ -199,7 +202,7 @@ func (s *Service) Ready(ctx context.Context, playerID string) error {
 	}
 	if a.LegendSeries {
 		if notifier != nil {
-			notifier.Broadcast(allPlayers(a), "legend_ban_required", map[string]any{"available_characters": domain.Characters, "draft": domain.LegendDraft{GameNumber: 1}})
+			notifier.Broadcast(allPlayers(a), "legend_ban_required", map[string]any{"available_characters": domain.Characters, "draft": domain.LegendDraft{GameNumber: 1}, "assignment": a})
 		}
 		time.AfterFunc(domain.LegendPickWindow, func() { s.autoLegendBans(a.MatchID) })
 		return nil
@@ -467,6 +470,9 @@ func (s *Service) SaveAndQuit(playerID string, combat, confirmForfeit bool) (dom
 		return p, errors.New("SL allowance exhausted")
 	}
 	st.PendingSL[teamID] = combat
+	if st.Assignment.Rules.SLTimerMode == "pause_on_save" && st.PausedAtMS[teamID] == 0 {
+		st.PausedAtMS[teamID] = time.Now().UnixMilli()
+	}
 	return p, nil
 }
 
@@ -485,6 +491,10 @@ func (s *Service) Resume(playerID, idempotency string) (domain.Progress, error) 
 		return domain.Progress{}, errors.New("there is no saved race session to resume")
 	}
 	p := st.Progress[teamID]
+	if pausedAt := st.PausedAtMS[teamID]; pausedAt > 0 {
+		st.PausedTotalMS[teamID] += max64(0, time.Now().UnixMilli()-pausedAt)
+		delete(st.PausedAtMS, teamID)
+	}
 	if combat {
 		p.CombatSLUsed++
 	} else {
@@ -635,7 +645,7 @@ func (s *Service) trySettle(ctx context.Context, matchID string) error {
 	}
 	firstP, firstOK := st.Progress[st.Assignment.FirstTeamID]
 	secondP, secondOK := st.Progress[st.Assignment.SecondTeamID]
-	forced := firstOK && (firstP.Outcome == domain.OutcomeForfeited || firstP.Outcome == domain.OutcomeSurrendered) || secondOK && (secondP.Outcome == domain.OutcomeForfeited || secondP.Outcome == domain.OutcomeSurrendered)
+	forced := firstOK && (firstP.Outcome == domain.OutcomeForfeited || firstP.Outcome == domain.OutcomeSurrendered || firstP.Outcome == domain.OutcomeTimedOut) || secondOK && (secondP.Outcome == domain.OutcomeForfeited || secondP.Outcome == domain.OutcomeSurrendered || secondP.Outcome == domain.OutcomeTimedOut)
 	finished := firstOK && secondOK && firstP.Outcome != domain.OutcomeActive && secondP.Outcome != domain.OutcomeActive
 	if !forced && !finished {
 		s.mu.Unlock()
@@ -696,7 +706,7 @@ func (s *Service) trySettle(ctx context.Context, matchID string) error {
 			s.mu.Unlock()
 			if notifier != nil {
 				notifier.Broadcast(players, "legend_game_settled", game)
-				notifier.Broadcast(players, "legend_pick_required", map[string]any{"available_characters": domain.AvailableCharacters(draft, draft.GameNumber), "draft": draft})
+				notifier.Broadcast(players, "legend_pick_required", map[string]any{"available_characters": domain.AvailableCharacters(draft, draft.GameNumber), "draft": draft, "assignment": a})
 			}
 			time.AfterFunc(domain.LegendPickWindow, func() { s.autoLegendPick(a.MatchID, a.GameID) })
 			return nil
@@ -842,6 +852,21 @@ func (s *Service) AssignmentFor(playerID string) (domain.Assignment, bool) {
 	return st.Assignment, true
 }
 
+func (s *Service) ClockForPlayer(playerID string) map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UnixMilli()
+	result := map[string]any{"server_unix_ms": now}
+	st, teamID, err := s.stateForPlayer(playerID)
+	if err != nil || st.Assignment.StartedAtMS == 0 {
+		return result
+	}
+	result["match_started_ms"] = st.Assignment.StartedAtMS
+	result["elapsed_ms"] = teamElapsed(st, teamID, now)
+	result["paused"] = st.PausedAtMS[teamID] > 0
+	return result
+}
+
 func (s *Service) IsInRace(playerID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -875,17 +900,48 @@ func (s *Service) timeout(matchID, gameID string) {
 		s.mu.Unlock()
 		return
 	}
+	now := time.Now().UnixMilli()
+	changed := false
+	nextDelay := st.Assignment.Rules.TimeLimitMS
 	for _, teamID := range []string{st.Assignment.FirstTeamID, st.Assignment.SecondTeamID} {
 		p := st.Progress[teamID]
 		p.MatchID, p.GameID, p.TeamID = matchID, st.Assignment.GameID, teamID
 		if p.Outcome == domain.OutcomeActive || p.Outcome == "" {
+			remaining := st.Assignment.Rules.TimeLimitMS - teamElapsed(st, teamID, now)
+			if remaining > 0 {
+				if remaining < nextDelay {
+					nextDelay = remaining
+				}
+				continue
+			}
 			p.Outcome = domain.OutcomeTimedOut
+			st.ForcedReasons[teamID] = domain.ReasonTimeout
+			changed = true
 		}
 		p.Sequence++
 		st.Progress[teamID] = p
 	}
 	s.mu.Unlock()
+	if !changed {
+		time.AfterFunc(time.Duration(max64(1000, nextDelay))*time.Millisecond, func() { s.timeout(matchID, gameID) })
+		return
+	}
 	_ = s.trySettle(context.Background(), matchID)
+}
+
+func teamElapsed(st *state, teamID string, now int64) int64 {
+	effectiveNow := now
+	if pausedAt := st.PausedAtMS[teamID]; pausedAt > 0 {
+		effectiveNow = pausedAt
+	}
+	return max64(0, effectiveNow-st.Assignment.StartedAtMS-st.PausedTotalMS[teamID])
+}
+
+func max64(first, second int64) int64 {
+	if first > second {
+		return first
+	}
+	return second
 }
 
 var _ = fmt.Sprintf

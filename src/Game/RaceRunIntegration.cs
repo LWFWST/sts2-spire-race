@@ -310,7 +310,7 @@ public sealed partial class RaceRunHud : Control
         if (_label is null) return;
         var now = checked((long)Time.GetTicksMsec());
         var elapsed = _snapshot.IsSynchronized
-            ? _snapshot.ElapsedMilliseconds + now - _snapshotAtTicks
+            ? _snapshot.ElapsedMilliseconds + (_snapshot.IsPaused ? 0 : now - _snapshotAtTicks)
             : _match.Kind == QueueKind.Entertainment && _match.Rules.CoordinationMode == "p2p"
                 ? Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _match.StartedAtUnixMilliseconds)
                 : Math.Max(0, now - _localStartedAtTicks);

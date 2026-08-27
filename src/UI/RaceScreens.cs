@@ -4,6 +4,7 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Modifiers;
 using Sts2SpireRace.Core;
 using Sts2SpireRace.Game;
+using Sts2SpireRace.Replay;
 
 namespace Sts2SpireRace.UI;
 
@@ -17,9 +18,12 @@ public static class RaceScreens
     public static void BuildHub(RacePage page)
     {
         SetServiceStatus(page);
+        var header = new HBoxContainer { CustomMinimumSize = new Vector2(0, 48), SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         var subtitle = RaceUiAssets.Label(RaceTextCatalog.Get("hub.subtitle"), 24, StsColors.cream, HorizontalAlignment.Center);
-        subtitle.CustomMinimumSize = new Vector2(0, 44);
-        page.Content.AddChild(subtitle);
+        subtitle.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        header.AddChild(subtitle);
+        header.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("spectate.title"), page.Controller.OpenSpectate, 18, new Vector2(190, 46)));
+        page.Content.AddChild(header);
 
         var cards = new HBoxContainer
         {
@@ -345,7 +349,7 @@ public static class RaceScreens
             {
                 if (!prompt.IsBanPhase)
                 {
-                    if (prompt.IsLocalSelector) _ = service.SelectLegendCharacterAsync(captured);
+                    if (prompt.IsLocalSelector) _ = SelectLegendCharacterAsync(page, service, captured);
                     return;
                 }
                 if (!selected.Remove(captured) && selected.Count < 2) selected.Add(captured);
@@ -361,12 +365,31 @@ public static class RaceScreens
             var actions = ActionRow();
             submit = RaceUiAssets.Button(RaceTextCatalog.Get("legend.ban.submit"), () =>
             {
-                if (selected.Count == 2) _ = service.SubmitLegendBansAsync(selected[0], selected[1]);
+                if (selected.Count == 2) _ = SubmitLegendBansAsync(page, service, selected[0], selected[1]);
             }, 23, new Vector2(260, 64));
             submit.SetEnabled(false); actions.AddChild(submit); page.Content.AddChild(actions);
         }
         else if (!prompt.IsLocalSelector)
             page.Status.SetTextAutoSize(RaceTextCatalog.Get("legend.pick.waiting"));
+    }
+
+    private static async Task SubmitLegendBansAsync(RacePage page, IRaceMatchService service, string first, string second)
+    {
+        try
+        {
+            await service.SubmitLegendBansAsync(first, second);
+            Defer(page, () => page.Status.SetTextAutoSize(RaceTextCatalog.Get("legend.ban.waiting")));
+        }
+        catch (Exception exception)
+        {
+            Defer(page, () => page.Status.SetTextAutoSize(exception.Message));
+        }
+    }
+
+    private static async Task SelectLegendCharacterAsync(RacePage page, IRaceMatchService service, string character)
+    {
+        try { await service.SelectLegendCharacterAsync(character); }
+        catch (Exception exception) { Defer(page, () => page.Status.SetTextAutoSize(exception.Message)); }
     }
 
     private static void RenderReadyCheck(RacePage page, QueueSnapshot snapshot)
@@ -534,8 +557,9 @@ public static class RaceScreens
 
         if (room is not null)
         {
+            var localSpectator = room.Spectators?.FirstOrDefault(x => x.PlayerId == page.Controller.LocalPlatformId);
             var roomHeader = RaceUiAssets.Label(
-                $"{RaceTextCatalog.Get("fun.room_code")}：{room.Code}   ·   {(canEdit ? RaceTextCatalog.Get("fun.host") : RaceTextCatalog.Get("fun.guest"))}",
+                $"{RaceTextCatalog.Get("fun.room_code")}：{room.Code}   ·   {(canEdit ? RaceTextCatalog.Get("fun.host") : localSpectator is not null ? RaceTextCatalog.Get("spectate.spectator") : RaceTextCatalog.Get("fun.guest"))}",
                 25, StsColors.gold, HorizontalAlignment.Center, true);
             roomHeader.CustomMinimumSize = new Vector2(0, 38);
             page.Content.AddChild(roomHeader);
@@ -556,6 +580,20 @@ public static class RaceScreens
             teams.AddChild(CompactRoomTeamPanel(RaceTextCatalog.Get("fun.team_two"), second.Take((int)rules.TeamSize), false));
             page.Content.AddChild(teams);
 
+            if (room.Spectators is { Count: > 0 })
+            {
+                var spectatorNames = room.Spectators.Select(x =>
+                    $"{x.DisplayName}  ·  {RaceTextCatalog.Format("spectate.watching_team", x.WatchingTeam)}");
+                var spectatorPanel = RaceUiAssets.Panel(DarkPanel, 10);
+                spectatorPanel.CustomMinimumSize = new Vector2(0, 48);
+                var spectatorLabel = RaceUiAssets.Label(
+                    $"{RaceTextCatalog.Get("spectate.seats")}  {room.Spectators.Count}/{rules.SpectatorSlots}   ·   {string.Join("    ", spectatorNames)}",
+                    18, StsColors.cream, HorizontalAlignment.Center);
+                spectatorLabel.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect, Control.LayoutPresetMode.KeepSize, 8);
+                spectatorPanel.AddChild(spectatorLabel);
+                page.Content.AddChild(spectatorPanel);
+            }
+
             var localMember = room.Members.FirstOrDefault(x => x.PlayerId == page.Controller.LocalPlatformId);
             if (localMember is not null)
             {
@@ -575,6 +613,21 @@ public static class RaceScreens
 
             var roomActions = ActionRow();
             roomActions.CustomMinimumSize = new Vector2(0, 52);
+            if (localSpectator is not null)
+            {
+                roomActions.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("spectate.team_one"),
+                    () => _ = SetSpectatorTargetAsync(page, 1), 18, new Vector2(190, 48)));
+                roomActions.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("spectate.team_two"),
+                    () => _ = SetSpectatorTargetAsync(page, 2), 18, new Vector2(190, 48)));
+                if (room.State != "waiting")
+                    roomActions.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("spectate.watch_live"),
+                        page.Controller.OpenSpectate, 18, new Vector2(210, 48)));
+                roomActions.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("fun.leave"),
+                    () => _ = LeaveEntertainmentRoomAsync(page), 19, new Vector2(210, 48)));
+                page.Content.AddChild(roomActions);
+            }
+            else
+            {
             var readyButton = RaceUiAssets.Button(RaceTextCatalog.Get(localMember?.IsReady == true ? "fun.unready" : "fun.ready"),
                 () =>
                 {
@@ -601,6 +654,7 @@ public static class RaceScreens
             }
             roomActions.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("fun.leave"), () => _ = LeaveEntertainmentRoomAsync(page), 19, new Vector2(210, 48)));
             page.Content.AddChild(roomActions);
+            }
             if (!canEdit)
                 page.Content.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("fun.host_only"), 18, StsColors.lightGray, HorizontalAlignment.Center));
         }
@@ -640,7 +694,8 @@ public static class RaceScreens
             var nextMode = rules.CoordinationMode == "p2p" ? "server" : "p2p";
             Apply(rules with
             {
-                CoordinationMode = nextMode
+                CoordinationMode = nextMode,
+                SpectatorSlots = nextMode == "p2p" ? 0 : rules.SpectatorSlots
             });
         }, page);
         AddOption(root, RaceTextCatalog.Get("fun.seed_mode"), RaceTextCatalog.Get(rules.RandomSeed ? "fun.random" : "fun.fixed"), () =>
@@ -682,6 +737,11 @@ public static class RaceScreens
         AddOption(root, RaceTextCatalog.Get("fun.timer"), RaceTextCatalog.Get(rules.TimerKind == "game_time" ? "fun.game_time" : "fun.real_time"), () =>
         {
             Apply(rules with { TimerKind = rules.TimerKind == "game_time" ? "real_time" : "game_time" });
+        }, page);
+        AddOption(root, RaceTextCatalog.Get("fun.sl_timer_mode"), RaceTextCatalog.Get(
+            rules.SlTimerMode == "pause_on_save" ? "fun.sl_timer_paused" : "fun.sl_timer_continuous"), () =>
+        {
+            Apply(rules with { SlTimerMode = rules.SlTimerMode == "pause_on_save" ? "continuous" : "pause_on_save" });
         }, page);
         AddOption(root, RaceTextCatalog.Get("fun.time_limit"), $"{rules.TimeLimitMinutes} min", () =>
         {
@@ -759,6 +819,13 @@ public static class RaceScreens
             var next = rules.Visibility == "friends" ? "public" : rules.Visibility == "public" ? "private" : "friends";
             Apply(rules with { Visibility = next });
         }, page);
+        if (rules.CoordinationMode != "p2p")
+        {
+            AddOption(root, RaceTextCatalog.Get("spectate.seats"), rules.SpectatorSlots.ToString(), () =>
+            {
+                Apply(rules with { SpectatorSlots = (rules.SpectatorSlots + 1) % 9 });
+            }, page);
+        }
 
         AddRulesSection(root, RaceTextCatalog.Get("fun.modifiers"));
         foreach (var modifier in OriginalModifierChoices())
@@ -802,6 +869,8 @@ public static class RaceScreens
                 joinRow.AddChild(roomCode);
                 var join = RaceUiAssets.Button(RaceTextCatalog.Get("fun.join"), () => _ = JoinEntertainmentRoomAsync(page, roomCode.Text), 20, new Vector2(180, 50));
                 joinRow.AddChild(join);
+                joinRow.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("spectate.join_seat"),
+                    () => _ = JoinEntertainmentSpectatorAsync(page, roomCode.Text), 18, new Vector2(220, 50)));
                 root.AddChild(joinRow);
             }
             var create = RaceUiAssets.Button(RaceTextCatalog.Get("fun.create"), () => _ = CreateEntertainmentRoomAsync(page), 25, new Vector2(360, 66));
@@ -870,6 +939,42 @@ public static class RaceScreens
         {
             Defer(page, () => page.Status.SetTextAutoSize(exception.Message));
         }
+    }
+
+    private static async Task JoinEntertainmentSpectatorAsync(RacePage page, string code)
+    {
+        try
+        {
+            if (code.Trim().Length != 6)
+                throw new InvalidOperationException(RaceTextCatalog.Get("fun.room_code_invalid"));
+            if (page.Controller.Services is not IRaceEntertainmentRoomService rooms)
+                throw new InvalidOperationException("Entertainment room service is unavailable.");
+            var room = await rooms.JoinSpectatorAsync(code.Trim().ToUpperInvariant());
+            page.Controller.CurrentEntertainmentRoom = room;
+            var identity = await page.Controller.Services.IdentityProvider.GetLocalIdentityAsync();
+            Defer(page, () =>
+            {
+                page.Controller.LocalPlatformId = identity.PlatformId.ToString();
+                page.Controller.EntertainmentRules = room.Rules;
+                page.Controller.CanEditEntertainmentRules = false;
+                page.Status.SetTextAutoSize(RaceTextCatalog.Format("spectate.joined_room", room.Code));
+                RenderEntertainment(page);
+            });
+        }
+        catch (Exception exception)
+        {
+            Defer(page, () => page.Status.SetTextAutoSize(exception.Message));
+        }
+    }
+
+    private static async Task SetSpectatorTargetAsync(RacePage page, int team)
+    {
+        try
+        {
+            if (page.Controller.Services is IRaceEntertainmentRoomService rooms)
+                await rooms.SetSpectatorTargetAsync(team);
+        }
+        catch (Exception exception) { Defer(page, () => page.Status.SetTextAutoSize(exception.Message)); }
     }
 
     private static async Task UpdateEntertainmentRoomRulesAsync(RacePage page, IRaceEntertainmentRoomService rooms, RaceRuleSet rules)
@@ -1017,8 +1122,7 @@ public static class RaceScreens
             foreach (var match in profile.RecentMatches)
             {
                 var line = $"{match.PlayedAt:MM-dd HH:mm}   {(match.Victory ? "WIN" : "LOSS"),-5}   {(int)match.TeamSize}v{(int)match.TeamSize}   {CharacterName(match.Character),-12}   {HistoryProgress(match.Completed, match.HighestFloor, match.RunTime)}   {match.RatingDelta:+#;-#;0}";
-                list.AddChild(RaceUiAssets.Button(line, () => page.Controller.OpenDetails(
-                    RaceTextCatalog.Get("profile.match_detail"), HistoryDetails(match)), 19, new Vector2(0, 52)));
+                list.AddChild(RaceUiAssets.Button(line, () => page.Controller.OpenMatchDetails(match), 19, new Vector2(0, 52)));
             }
             if (profile.RecentMatches.Count == 0)
                 list.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("profile.no_matches"), 20, StsColors.lightGray, HorizontalAlignment.Center));
@@ -1181,6 +1285,8 @@ public static class RaceScreens
         text.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
         row.AddChild(text);
         row.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("common.view"), () => page.Controller.OpenProfile(friend.Id), 18, new Vector2(110, 48)));
+        if (friend.Presence == FriendPresence.InRace)
+            row.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("spectate.watch"), page.Controller.OpenSpectate, 18, new Vector2(110, 48)));
         if (friend.Presence == FriendPresence.SearchResult)
             row.AddChild(RaceUiAssets.Button(RaceTextCatalog.Get("common.add"), () => _ = FriendAction(
                 async () => await page.Controller.Services.SendFriendRequestAsync(friend.Id), "friends.request_sent"), 18, new Vector2(110, 48)));
@@ -1416,6 +1522,124 @@ public static class RaceScreens
     {
         await page.Controller.Services.ClaimRewardAsync(level);
         await ReloadActivity(page);
+    }
+
+    public static void BuildMatchDetails(RacePage page, MatchHistoryEntry match)
+    {
+        foreach (var paragraph in HistoryDetails(match))
+            page.Content.AddChild(RaceUiAssets.Label(paragraph, 21, StsColors.cream, HorizontalAlignment.Center));
+        page.Content.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("replay.recordings"), 28, StsColors.gold, HorizontalAlignment.Left, true));
+        var list = ScrollList(page.Content);
+        list.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("replay.loading"), 20, StsColors.lightGray, HorizontalAlignment.Center));
+        _ = LoadMatchReplaysAsync(page, match, list);
+    }
+
+    private static async Task LoadMatchReplaysAsync(RacePage page, MatchHistoryEntry match, VBoxContainer list)
+    {
+        try
+        {
+            var replays = await page.Controller.Services.GetMatchReplaysAsync(match.MatchId);
+            Defer(page, () =>
+            {
+                if (!IsAlive(page) || !IsAlive(list)) return;
+                foreach (var child in list.GetChildren()) child.QueueFree();
+                var gameOrder = (match.SeriesGames ?? Array.Empty<LegendGameResult>()).Where(x => !string.IsNullOrWhiteSpace(x.GameId))
+                    .ToDictionary(x => x.GameId, x => x.GameNumber, StringComparer.Ordinal);
+                foreach (var replay in replays.OrderBy(x => gameOrder.GetValueOrDefault(x.GameId, 999))
+                             .ThenBy(x => x.GameId).ThenBy(x => x.TeamId).ThenBy(x => x.DisplayName))
+                {
+                    var captured = replay;
+                    var game = gameOrder.TryGetValue(captured.GameId, out var gameNumber) ? $"G{gameNumber}   ·   " : string.Empty;
+                    var local = !string.IsNullOrWhiteSpace(match.LocalTeamId) && captured.TeamId == match.LocalTeamId;
+                    var side = RaceTextCatalog.Get(local ? "replay.local_side" : "replay.opponent_side");
+                    var status = RaceTextCatalog.Get(captured.IsLive ? "replay.live" : captured.Completed ? "replay.complete" : "replay.partial");
+                    var row = OptionRow($"{game}{side}   ·   {captured.DisplayName}   ·   {CharacterName(captured.CharacterId)}   ·   {status}");
+                    var watch = RaceUiAssets.Button(RaceTextCatalog.Get("replay.watch"), () =>
+                        _ = StartReplayAsync(page, captured, captured.IsLive), 18, new Vector2(190, 48));
+                    watch.SetEnabled(captured.EventCount > 0);
+                    row.AddChild(watch);
+                    list.AddChild(row);
+                    page.SetInitialFocus(watch);
+                }
+                if (replays.Count == 0)
+                    list.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("replay.none"), 20, StsColors.lightGray, HorizontalAlignment.Center));
+            });
+        }
+        catch (Exception exception)
+        {
+            Defer(page, () => page.Status.SetTextAutoSize(exception.Message));
+        }
+    }
+
+    public static void BuildSpectate(RacePage page)
+    {
+        SetServiceStatus(page);
+        page.Content.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("spectate.description"), 21, StsColors.cream, HorizontalAlignment.Center));
+        var list = ScrollList(page.Content);
+        list.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("replay.loading"), 20, StsColors.lightGray, HorizontalAlignment.Center));
+        _ = LoadSpectatableAsync(page, list);
+    }
+
+    private static async Task LoadSpectatableAsync(RacePage page, VBoxContainer list)
+    {
+        try
+        {
+            var races = await page.Controller.Services.GetSpectatableRacesAsync();
+            Defer(page, () =>
+            {
+                if (!IsAlive(page) || !IsAlive(list)) return;
+                foreach (var child in list.GetChildren()) child.QueueFree();
+                foreach (var race in races)
+                {
+                    var captured = race;
+                    var source = captured.IsLegendPublic
+                        ? RaceTextCatalog.Get("spectate.legend")
+                        : RaceTextCatalog.Get("spectate.friend");
+                    var row = OptionRow($"{captured.DisplayName}   ·   {CharacterName(captured.CharacterId)}   ·   {source}");
+                    var watch = RaceUiAssets.Button(RaceTextCatalog.Get("spectate.watch_live"), () =>
+                        _ = StartLiveSpectateAsync(page, captured), 18, new Vector2(220, 48));
+                    row.AddChild(watch);
+                    list.AddChild(row);
+                    page.SetInitialFocus(watch);
+                }
+                if (races.Count == 0)
+                    list.AddChild(RaceUiAssets.Label(RaceTextCatalog.Get("spectate.none"), 20, StsColors.lightGray, HorizontalAlignment.Center));
+            });
+        }
+        catch (Exception exception)
+        {
+            Defer(page, () => page.Status.SetTextAutoSize(exception.Message));
+        }
+    }
+
+    private static async Task StartReplayAsync(RacePage page, RaceReplaySummary replay, bool live)
+    {
+        try
+        {
+            page.Status.SetTextAutoSize(RaceTextCatalog.Get("replay.preparing"));
+            if (!ReplayMod.TryInitialize())
+                throw new InvalidOperationException(ReplayMod.InitializationError ?? RaceTextCatalog.Get("replay.unavailable"));
+            await RaceReplayCloudCoordinator.WatchAsync(replay, live);
+        }
+        catch (Exception exception)
+        {
+            Defer(page, () => page.Status.SetTextAutoSize(exception.Message));
+        }
+    }
+
+    private static async Task StartLiveSpectateAsync(RacePage page, SpectatableRace race)
+    {
+        try
+        {
+            page.Status.SetTextAutoSize(RaceTextCatalog.Get("replay.preparing"));
+            if (!ReplayMod.TryInitialize())
+                throw new InvalidOperationException(ReplayMod.InitializationError ?? RaceTextCatalog.Get("replay.unavailable"));
+            await RaceReplayCloudCoordinator.WatchMatchAsync(race);
+        }
+        catch (Exception exception)
+        {
+            Defer(page, () => page.Status.SetTextAutoSize(exception.Message));
+        }
     }
 
     public static void BuildDetails(RacePage page, IEnumerable<string> paragraphs)

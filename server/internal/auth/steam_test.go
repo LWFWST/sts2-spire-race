@@ -2,10 +2,21 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+func TestSteamVerifierAllowsDevelopmentTicketBeforeConfiguredSteamAPI(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("Steam API must not be called for an enabled development ticket")
+	})}
+	verifier := SteamVerifier{APIKey: "web-key", AppID: "2868840", AllowDev: true, Client: client}
+	if err := verifier.Verify(context.Background(), "90000000000000001", "development"); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestSteamVerifierFallsBackAfterPublisherForbidden(t *testing.T) {
 	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -27,6 +38,12 @@ func TestSteamVerifierFallsBackAfterPublisherForbidden(t *testing.T) {
 	if err := verifier.Verify(context.Background(), "76561199871087714", "ticket"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func TestSteamVerifierDoesNotFallbackAfterTicketRejection(t *testing.T) {

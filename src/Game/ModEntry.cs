@@ -9,6 +9,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Saves;
 using Sts2SpireRace.UI;
 using Sts2SpireRace.Core;
+using Sts2SpireRace.Replay;
 
 namespace Sts2SpireRace.Game;
 
@@ -32,6 +33,7 @@ internal static class MainMenuInjectionPatch
         try
         {
             RaceUnlockIntegration.UnlockCurrentProfile();
+            ReplayMod.TryInitialize();
             if (__instance.GetNodeOrNull<RaceUiController>("SpireRaceController") is not null)
                 return;
             var container = __instance.GetNode<Control>("MainMenuTextButtons");

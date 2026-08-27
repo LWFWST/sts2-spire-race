@@ -58,6 +58,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
     private ProgressCheckpoint? _localProgress;
     private string _seriesPreparingGameId = string.Empty;
     private string _appliedSwapPlan = string.Empty;
+    private string _draftPollToken = string.Empty;
 
     public SteamP2PRaceCoordinator(RaceSessionLauncher launcher)
     {
@@ -263,7 +264,10 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         SetLobby(StartedAtKey, requiresDraft ? "0" : DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds().ToString());
         SetLobby(StateKey, requiresDraft ? "draft_ban" : rules.TeamSize == TeamSize.One ? "launching" : "preparing_team_lobbies");
         if (requiresDraft)
+        {
             ScheduleDraftTimeout(GetLobby(GameKey), "draft_ban");
+            EnsureDraftPolling(GetLobby(GameKey), "draft_ban");
+        }
         RefreshFromSteam();
         return Task.FromResult(CurrentRoom!);
     }
@@ -336,7 +340,12 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         if (_lobby is null || GetLobby(StateKey) != "draft_ban" || !Characters.Contains(banOne, StringComparer.Ordinal) ||
             !Characters.Contains(banTwo, StringComparer.Ordinal) || banOne == banTwo)
             throw new InvalidOperationException(RaceTextCatalog.Get("legend.ban.body"));
-        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberBansKey, JsonSerializer.Serialize(new[] { banOne, banTwo }, Json));
+        var encoded = JsonSerializer.Serialize(new[] { banOne, banTwo }, Json);
+        SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberBansKey, encoded);
+        var localId = SteamUser.GetSteamID().m_SteamID.ToString();
+        if (!string.Equals(MemberData(localId, MemberBansKey), encoded, StringComparison.Ordinal))
+            throw new InvalidOperationException("Steam failed to submit the BO3 bans.");
+        Log.Info($"[SpireRace] Submitted P2P BO3 bans for game {GetLobby(GameKey)}.");
         RefreshFromSteam();
         return Task.CompletedTask;
     }
@@ -415,6 +424,8 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
 
         if (state is "draft_ban" or "draft_pick")
         {
+            if (IsLocalHost())
+                EnsureDraftPolling(GetLobby(GameKey), state);
             if (CurrentMatch is null)
             {
                 CurrentMatch = BuildAssignment();
@@ -429,6 +440,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         }
         else if (CurrentLegendDraft is not null)
         {
+            _draftPollToken = string.Empty;
             CurrentLegendDraft = null;
             LegendDraftChanged?.Invoke(null);
         }
@@ -522,6 +534,8 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         SetLobby(SharedCharacterKey, selected);
         SetLobby(StartedAtKey, DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds().ToString());
         SetLobby(StateKey, "launching");
+        _draftPollToken = string.Empty;
+        Log.Info($"[SpireRace] Locked P2P BO3 bans and selected {selected} for game {GetLobby(GameKey)}.");
         CurrentMatch = null;
         MatchChanged?.Invoke(null);
         return true;
@@ -551,6 +565,8 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         SetLobby(SharedCharacterKey, selected);
         SetLobby(StartedAtKey, DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds().ToString());
         SetLobby(StateKey, "launching");
+        _draftPollToken = string.Empty;
+        Log.Info($"[SpireRace] Locked P2P BO3 pick {selected} for game {GetLobby(GameKey)}.");
         CurrentMatch = null;
         MatchChanged?.Invoke(null);
         return true;
@@ -581,6 +597,34 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         if (_lobby is null || GetLobby(GameKey) != gameId || GetLobby(StateKey) != phase)
             return;
         Callable.From(RefreshFromSteam).CallDeferred();
+    }
+
+    private async void EnsureDraftPolling(string gameId, string phase)
+    {
+        var token = $"{gameId}:{phase}";
+        if (_draftPollToken == token)
+            return;
+        _draftPollToken = token;
+        // Steam normally emits LobbyDataUpdate for member-data changes, but in
+        // practice that callback can be coalesced or delayed when two local
+        // clients submit bans at nearly the same time.  The lobby owner polls
+        // briefly as a fallback so a completed BO3 draft launches promptly.
+        for (var attempt = 0; attempt < (RaceRules.LegendPickSeconds + 2) * 4; attempt++)
+        {
+            await Task.Delay(250);
+            if (_draftPollToken != token)
+                return;
+            Callable.From(() =>
+            {
+                if (_lobby is null || !IsLocalHost() || GetLobby(GameKey) != gameId || GetLobby(StateKey) != phase)
+                {
+                    if (_draftPollToken == token)
+                        _draftPollToken = string.Empty;
+                    return;
+                }
+                RefreshFromSteam();
+            }).CallDeferred();
+        }
     }
 
     private async Task PrepareLocalTeamLobbyAsync()
@@ -698,6 +742,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         {
             SetLobby(StateKey, "draft_pick");
             ScheduleDraftTimeout(gameId, "draft_pick");
+            EnsureDraftPolling(gameId, "draft_pick");
             RefreshFromSteam();
             return;
         }
@@ -810,7 +855,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         var games = ReadSeriesGames().ToList();
         var winnerProgress = winner == first.TeamId ? first : second;
         games.Add(new LegendGameResult(games.Count + 1, GetLobby(SharedCharacterKey), winner, reason,
-            winnerProgress.CompletedAtMilliseconds ?? winnerProgress.FloorEnteredAtMilliseconds));
+            winnerProgress.CompletedAtMilliseconds ?? winnerProgress.FloorEnteredAtMilliseconds, GetLobby(GameKey)));
         var firstWins = games.Count(x => x.WinnerTeamId.EndsWith("team1", StringComparison.Ordinal));
         var secondWins = games.Count(x => x.WinnerTeamId.EndsWith("team2", StringComparison.Ordinal));
         if (firstWins >= 2 || secondWins >= 2)
@@ -860,7 +905,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
             {
                 var winnerProgress = winner == first.TeamId ? first : second;
                 existing.Add(new LegendGameResult(existing.Count + 1, GetLobby(SharedCharacterKey), winner, reason,
-                    winnerProgress.CompletedAtMilliseconds ?? winnerProgress.FloorEnteredAtMilliseconds));
+                    winnerProgress.CompletedAtMilliseconds ?? winnerProgress.FloorEnteredAtMilliseconds, GetLobby(GameKey)));
                 SetLobby(SeriesGamesKey, JsonSerializer.Serialize(existing, Json));
             }
             seriesGames = existing;
@@ -1060,6 +1105,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         _localProgress = null;
         _seriesPreparingGameId = string.Empty;
         _appliedSwapPlan = string.Empty;
+        _draftPollToken = string.Empty;
         CurrentRoom = null;
         CurrentMatch = null;
         CurrentSettlement = null;

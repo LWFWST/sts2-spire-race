@@ -21,17 +21,17 @@
   "allowed_mod_files": [
     {
       "path": "mods/sts2-spire-race/manifest.json",
-      "sha256": "96e83083b5f4f6aa8c6891dfd022748b69abb0b6442460c060cf6c4a6b1e8a88",
+      "sha256": "9791112f6b3d427c967adf00e8adf2653914ae729276f0ccc1761c4637331896",
       "size": 316
     },
     {
       "path": "mods/sts2-spire-race/sts2-spire-race.dll",
-      "sha256": "2a278b4cb090625ab543c31330c04678e9900bb265d94a274c479e06f7664f1e",
-      "size": 557568
+      "sha256": "c60d50f7629fbf317b090518afd65ac0e058a4ba8022211bfafef5666313d5bc",
+      "size": 775680
     }
   ],
   "allowed_mod_ids": [
     "sts2-spire-race"
   ],
-  "signature": "a9cb7fc580ac28553b09185c7a2e312db55bf68442d486faed461195daaede5a"
+  "signature": "1120ed22a4e7f4f8eabd45b5975f3b573b941d49a1faa399b106351535c5d861"
 }

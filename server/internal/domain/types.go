@@ -62,6 +62,8 @@ type Rules struct {
 	CoordinationMode         string   `json:"coordination_mode,omitempty"`
 	BestOf                   int      `json:"best_of,omitempty"`
 	SeriesSeeds              []string `json:"series_seeds,omitempty"`
+	SLTimerMode              string   `json:"sl_timer_mode,omitempty"`
+	SpectatorSlots           int      `json:"spectator_slots,omitempty"`
 }
 
 type Progress struct {

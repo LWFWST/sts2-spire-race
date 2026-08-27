@@ -10,12 +10,17 @@ An in-game, native-style competitive speedrun client and Go race server for Slay
 - Certified finish/highest-floor adjudication, death restart, event/combat SL budgets, Elo and visible ranked points.
 - Legend solo BO3 draft with persistent slot-one bans and game-one-only slot-two bans.
 - Entertainment rooms with A0-A10, BO1/BO3 and 0-9 SL customization, host-controlled start, per-player ready/character state, Steam friend invitations, and either direct Steam P2P or server coordination.
+- Embedded whole-run action recording and native-style replay controls; completed match details can play either side, including every BO3 game.
+- Friend and public Legend live spectating through uploaded action streams, plus server-room spectator seats and live player switching.
+- Entertainment timing can use the strict shared wall clock or pause each team's clock between Save & Quit and Resume.
 - Steam local identity with deterministic demo profiles, friends, leaderboards, titles, and events.
 - Simplified Chinese and English UI.
 
 The default client starts disconnected, so Steam P2P friend races remain available without any race server. The official `https://spirerace.xyz/` service or a custom/self-hosted URL can be selected explicitly in Settings or set with `SPIRE_RACE_SERVER_URL`. `--spire-race-demo` enables the non-persistent demo flow. `--spire-race-dev-auth` is accepted only by a self-hosted server configured with `ALLOW_DEV_AUTH=true`.
 
 Solo assignments launch a real shared-seed race. Team assignments elect one Steam host per team and use the original game's Steam transport for all gameplay; the Go service never proxies gameplay packets. A direct entertainment P2P room is a Steam coordination lobby, not one shared cooperative run: 1v1 launches two independent same-seed, same-character runs, while 2v2-4v4 creates one original Steam cooperative lobby for each team and races those two independent teams. Lobby member data carries ready state, team choice, progress and the casual settlement. Direct P2P creates no official record and deliberately does not use the official whitelist, integrity checks, Elo or ranked points.
+
+Replay is built into `sts2-spire-race`; the standalone Replay Mod is neither required nor modified. Cloud replay, friend spectating, public Legend spectating and server-room spectator seats require a configured race server. Offline Steam P2P races continue to work without those cloud features.
 
 ## Build and install
 

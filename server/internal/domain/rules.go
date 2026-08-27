@@ -78,6 +78,19 @@ func NormalizeEntertainmentRules(rules Rules) Rules {
 	rules.CharacterPolicy = "host_for_1v1"
 	rules.VictoryRule = "certified_race"
 	rules.AllowSpectators = false
+	if rules.SLTimerMode != "pause_on_save" {
+		rules.SLTimerMode = "continuous"
+	}
+	if rules.SpectatorSlots < 0 {
+		rules.SpectatorSlots = 0
+	}
+	if rules.SpectatorSlots > 8 {
+		rules.SpectatorSlots = 8
+	}
+	if rules.CoordinationMode == "p2p" {
+		rules.SpectatorSlots = 0
+	}
+	rules.AllowSpectators = rules.SpectatorSlots > 0
 	if len(rules.SeriesSeeds) > 3 {
 		rules.SeriesSeeds = append([]string(nil), rules.SeriesSeeds[:3]...)
 	}

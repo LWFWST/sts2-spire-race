@@ -48,6 +48,8 @@ public sealed partial class RaceUiController : Node
         {
             _roomCallback = room => Callable.From(() =>
             {
+                if (!CanUseMainMenu())
+                    return;
                 if (room is null || room.CoordinationMode != EntertainmentCoordinationMode.SteamP2P)
                     return;
                 var isNewRoom = CurrentEntertainmentRoom?.Code != room.Code;
@@ -158,12 +160,22 @@ public sealed partial class RaceUiController : Node
 
     public void Open(string title, Action<RacePage> builder)
     {
+        // Steam lobby callbacks can already be queued while the game is
+        // tearing down the main menu for a race launch.  Never let one of
+        // those stale callbacks reopen a page on the disposed submenu stack.
+        if (!CanUseMainMenu())
+            return;
         var page = new RacePage().Configure(this, title, builder);
         page.Name = $"SpireRacePage_{Time.GetTicksMsec()}";
         page.Visible = false;
         _mainMenu.SubmenuStack.AddChild(page);
         _mainMenu.SubmenuStack.Push(page);
     }
+
+    private bool CanUseMainMenu() =>
+        GodotObject.IsInstanceValid(this) && IsInsideTree() &&
+        GodotObject.IsInstanceValid(_mainMenu) && _mainMenu.IsInsideTree() &&
+        GodotObject.IsInstanceValid(_mainMenu.SubmenuStack);
 
     public void OpenModeSelection(QueueKind kind, bool teamOnly = false) =>
         _ = OpenAuthenticatedAsync(() => OpenModeSelectionPage(kind, teamOnly));
@@ -181,6 +193,9 @@ public sealed partial class RaceUiController : Node
     public void OpenProfile(string? playerId = null) => Open(RaceTextCatalog.Get("profile.title"), page => RaceScreens.BuildProfile(page, playerId));
     public void OpenFriends() => Open(RaceTextCatalog.Get("friends.title"), RaceScreens.BuildFriends);
     public void OpenLeaderboard() => Open(RaceTextCatalog.Get("leaderboard.title"), RaceScreens.BuildLeaderboard);
+    public void OpenSpectate() => _ = OpenAuthenticatedAsync(() => Open(RaceTextCatalog.Get("spectate.title"), RaceScreens.BuildSpectate));
+    public void OpenMatchDetails(MatchHistoryEntry match) =>
+        Open(RaceTextCatalog.Get("profile.match_detail"), page => RaceScreens.BuildMatchDetails(page, match));
     public void OpenTitles() => OpenComingSoon(RaceTextCatalog.Get("titles.title"), RaceTextCatalog.Get("coming_soon.titles"));
     public void OpenActivity() => OpenComingSoon(RaceTextCatalog.Get("activity.title"), RaceTextCatalog.Get("coming_soon.activity"));
     public void OpenSettings() => Open(RaceTextCatalog.Get("settings.title"), RaceScreens.BuildSettings);

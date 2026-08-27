@@ -244,6 +244,18 @@ public sealed class DemoRaceServices : IRaceServices
         return Task.CompletedTask;
     }
 
+    public Task UploadReplayAsync(RaceReplaySummary replay, byte[] bundle, CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
+
+    public Task<IReadOnlyList<RaceReplaySummary>> GetMatchReplaysAsync(string matchId, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<RaceReplaySummary>>(Array.Empty<RaceReplaySummary>());
+
+    public Task<IReadOnlyList<SpectatableRace>> GetSpectatableRacesAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<SpectatableRace>>(Array.Empty<SpectatableRace>());
+
+    public Task<byte[]> DownloadReplayAsync(string matchId, string gameId, string playerId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(Array.Empty<byte>());
+
     private async Task AutoFindMatchAsync(CancellationToken cancellationToken)
     {
         try

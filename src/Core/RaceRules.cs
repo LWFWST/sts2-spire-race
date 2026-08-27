@@ -28,7 +28,9 @@ public static class RaceRules
         Visibility: "matchmade",
         Modifiers: Array.Empty<string>(),
         EventSlLimit: 3,
-        CombatSlLimit: 3);
+        CombatSlLimit: 3,
+        SlTimerMode: "continuous",
+        SpectatorSlots: 0);
 
     public static RaceRuleSet EntertainmentDefault() => CompetitiveDefault(TeamSize.Two) with
     {
@@ -47,12 +49,15 @@ public static class RaceRules
     {
         var seeds = rules.SeriesSeeds?.Select(x => x?.Trim() ?? string.Empty).Take(3).ToArray()
             ?? Array.Empty<string>();
+        var spectatorSlots = rules.CoordinationMode == "p2p" ? 0 : Math.Clamp(rules.SpectatorSlots, 0, 8);
         return rules with
         {
             AllowDuplicateCharacters = true,
             CharacterPolicy = "host_for_1v1",
             VictoryRule = "certified_race",
-            AllowSpectators = false,
+            AllowSpectators = spectatorSlots > 0,
+            SpectatorSlots = spectatorSlots,
+            SlTimerMode = rules.SlTimerMode == "pause_on_save" ? "pause_on_save" : "continuous",
             Modifiers = rules.Modifiers?.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
                 ?? Array.Empty<string>(),
             SeriesSeeds = seeds
@@ -114,5 +119,9 @@ public static class RaceRules
             throw new ArgumentOutOfRangeException(nameof(rules), "Series length must be BO1 or BO3.");
         if (rules.SeriesSeeds is { Count: > 3 })
             throw new ArgumentException("A series may define at most three seeds.", nameof(rules));
+        if (rules.SpectatorSlots is < 0 or > 8)
+            throw new ArgumentOutOfRangeException(nameof(rules.SpectatorSlots));
+        if (rules.SlTimerMode is not "continuous" and not "pause_on_save")
+            throw new ArgumentOutOfRangeException(nameof(rules.SlTimerMode));
     }
 }
