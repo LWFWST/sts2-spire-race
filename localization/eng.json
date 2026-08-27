@@ -186,6 +186,7 @@
   "fun.unready": "UNREADY",
   "fun.start": "START RACE",
   "fun.starting": "The host started the race. Creating both Steam race lobbies...",
+  "fun.steam_required": "2v2 and larger game sessions still use Steam networking. Steam is not initialized in this test client; use real Steam clients, or test a server-coordinated 1v1 locally.",
   "fun.room_closed_by_host": "The host closed the room. You have left the room.",
   "fun.connection_mode": "Connection coordination",
   "fun.connection_server": "Race server coordinated",

@@ -36,6 +36,8 @@ public static class ReplayUiInteractionPolicy
             return false;
         for (Node? node = control; node != null; node = node.GetParent())
         {
+            if (node is ReplayControlsOverlay or RunReplayControlsOverlay)
+                return true;
             if (node is NDeckViewScreen or NCardPileScreen or NInspectCardScreen)
                 return true;
             if (node is NMapScreen)

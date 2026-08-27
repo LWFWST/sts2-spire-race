@@ -186,6 +186,7 @@
   "fun.unready": "取消准备",
   "fun.start": "开始竞速",
   "fun.starting": "房主已开始，正在建立双方的 Steam 竞速房间……",
+  "fun.steam_required": "2v2及以上的游戏联机仍通过 Steam。当前测试客户端未初始化 Steam，请使用真实 Steam 客户端；本地开发客户端可测试1v1服务器竞速。",
   "fun.room_closed_by_host": "房主已销毁房间，你已退出该房间。",
   "fun.connection_mode": "联机协调方式",
   "fun.connection_server": "竞赛服务器协调",

@@ -32,6 +32,7 @@ using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Runs.Metrics;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Rewards;
+using Sts2SpireRace.Game;
 
 namespace Sts2SpireRace.Replay;
 
@@ -69,6 +70,15 @@ internal static class HarmonyPatches
     [HarmonyPrefix]
     private static void BeforeRunCleanup()
     {
+        if (RaceActiveSession.Current is { } active && RacePendingSave.IsPending(active.GameId))
+        {
+            // A coordinated save-and-quit is a live SL transition, not the end
+            // of the replay. Keep the cloud row live so spectators can resume
+            // from the same operation stream when the player continues.
+            ReplayMod.Recorder?.FlushPartial();
+            BranchSaveRouter.FlushActiveCombat();
+            return;
+        }
         ReplayMod.Recorder?.FinalizeActiveAsIncomplete();
         BranchSaveRouter.FlushActiveCombat();
     }

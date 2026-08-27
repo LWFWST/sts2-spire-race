@@ -5,7 +5,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
+using MegaCrit.Sts2.Core.Platform.Steam;
 using Sts2SpireRace.Game;
 
 namespace Sts2SpireRace.Core;
@@ -484,6 +486,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         if (CurrentRoom is null) throw new InvalidOperationException("No entertainment room is active.");
         if (CurrentRoom.CoordinationMode == EntertainmentCoordinationMode.SteamP2P)
             return await _p2p!.StartRoomAsync(cancellationToken);
+        if (CurrentRoom.Rules.TeamSize != TeamSize.One && !SteamInitializer.Initialized)
+            throw new InvalidOperationException(RaceTextCatalog.Get("fun.steam_required"));
         var room = await PostAsync<RoomDto>($"v1/rooms/{CurrentRoom.Code}/start", new { }, true, cancellationToken);
         return ApplyRoom(room);
     }
@@ -746,7 +750,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                     case "match_found": ApplyAssignment(data.Deserialize<AssignmentDto>(Json)!, QueueState.ReadyCheck); break;
                     case "match_started":
                         ApplyAssignment(data.Deserialize<AssignmentDto>(Json)!, QueueState.Starting);
-                        if (CurrentMatch is not null) await SessionLauncher.LaunchAsync(CurrentMatch, cancellationToken);
+                        if (CurrentMatch is not null)
+                            await RunOnMainThreadAsync(() => SessionLauncher.LaunchAsync(CurrentMatch, cancellationToken));
                         break;
                     case "clock":
                         if (data.TryGetProperty("server_unix_ms", out var now))
@@ -764,7 +769,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                     case "settlement": ApplySettlement(data.Deserialize<SettlementDto>(Json)!); break;
                     case "legend_game_settled":
                     case "series_game_settled":
-                        await RaceSeriesTransition.PrepareNextGameAsync();
+                        await RunOnMainThreadAsync(RaceSeriesTransition.PrepareNextGameAsync);
                         break;
                     case "finish_pending":
                         _localFinishPending = data.TryGetProperty("completed_at_ms", out var completedAt) && completedAt.ValueKind == JsonValueKind.Number
@@ -787,7 +792,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                         if (SessionLauncher is IRaceSteamLobbyCoordinator roomCoordinator)
                         {
                             var prepared = BuildEntertainmentAssignment(requiredRoom, roomLobby.HostPlayerId, "", "");
-                            var roomLobbyId = await roomCoordinator.CreateTeamLobbyAsync(prepared, cancellationToken);
+                            var roomLobbyId = await RunOnMainThreadAsync(() => roomCoordinator.CreateTeamLobbyAsync(prepared, cancellationToken));
                             await SendSocketPayloadAsync(socket, "entertainment_steam_lobby_ready", new { code = requiredRoom.Code, lobby_id = roomLobbyId.ToString() }, cancellationToken);
                         }
                         break;
@@ -803,7 +808,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                         CurrentSettlement = null;
                         MatchChanged?.Invoke(CurrentMatch);
                         SetQueue(new QueueSnapshot(QueueState.Starting, _queueRequest, _localTeam, _opponentTeam, Detail: "starting"));
-                        await SessionLauncher.LaunchAsync(CurrentMatch, cancellationToken);
+                        await RunOnMainThreadAsync(() => SessionLauncher.LaunchAsync(CurrentMatch, cancellationToken));
                         break;
                     case "entertainment_room_closed":
                         CurrentRoom = null;
@@ -820,7 +825,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                         ApplyAssignment(lobbyAssignment, QueueState.Starting);
                         if (SessionLauncher is IRaceSteamLobbyCoordinator coordinator)
                         {
-                            var lobbyId = await coordinator.CreateTeamLobbyAsync(CurrentMatch!, cancellationToken);
+                            var lobbyId = await RunOnMainThreadAsync(() => coordinator.CreateTeamLobbyAsync(CurrentMatch!, cancellationToken));
                             await SendSocketPayloadAsync(socket, "steam_lobby_ready", new { lobby_id = lobbyId.ToString() }, cancellationToken);
                         }
                         break;
@@ -843,6 +848,60 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
             if (CurrentQueue.State is QueueState.Searching or QueueState.MatchFound or QueueState.ReadyCheck or QueueState.Lobby or QueueState.Starting)
                 SetQueue(new QueueSnapshot(QueueState.Idle, _queueRequest, _localTeam, Detail: "connection_lost"));
         }
+        catch (Exception exception)
+        {
+            Log.Error($"[SpireRace] Realtime event handling failed: {exception}");
+            SetQueue(new QueueSnapshot(QueueState.Idle, _queueRequest, _localTeam, Detail: "launch_failed"));
+            if (CurrentRoom?.State == "starting")
+                RoomExited?.Invoke("launch_failed");
+        }
+    }
+
+    private static Task RunOnMainThreadAsync(Func<Task> action)
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Godot.Callable.From(() =>
+        {
+            _ = ExecuteAsync();
+            return;
+
+            async Task ExecuteAsync()
+            {
+                try
+                {
+                    await action();
+                    completion.TrySetResult();
+                }
+                catch (Exception exception)
+                {
+                    completion.TrySetException(exception);
+                }
+            }
+        }).CallDeferred();
+        return completion.Task;
+    }
+
+    private static async Task<T> RunOnMainThreadAsync<T>(Func<Task<T>> action)
+    {
+        var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Godot.Callable.From(() =>
+        {
+            _ = ExecuteAsync();
+            return;
+
+            async Task ExecuteAsync()
+            {
+                try
+                {
+                    completion.TrySetResult(await action());
+                }
+                catch (Exception exception)
+                {
+                    completion.TrySetException(exception);
+                }
+            }
+        }).CallDeferred();
+        return await completion.Task;
     }
 
     private void ApplyAssignment(AssignmentDto dto, QueueState state)

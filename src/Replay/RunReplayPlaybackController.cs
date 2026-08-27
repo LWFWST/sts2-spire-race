@@ -73,6 +73,19 @@ public sealed class RunReplayPlaybackController
         ? (_timeline?.Markers.ElementAtOrDefault(_checkpointIndex)?.Label ?? "Ready")
         : (_inputs?.Events.ElementAtOrDefault(_nextEventIndex - 1)?.Label ?? "Ready");
     public bool CanTakeOver => !_playing && CurrentCheckpointIsExact();
+    public RunReplayManifest? CurrentRun => _run;
+    public long DisplayRaceElapsedMs
+    {
+        get
+        {
+            if (_run == null || _liveRefresh == null)
+                return _displayElapsedMs;
+            var liveElapsed = _run.RaceElapsedMs;
+            if (!_run.RaceTimerPaused && _run.RaceElapsedUpdatedAtUnixMs > 0)
+                liveElapsed += Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _run.RaceElapsedUpdatedAtUnixMs);
+            return Math.Max(_displayElapsedMs, liveElapsed);
+        }
+    }
 
     public RunReplayPlaybackController(ReplayStorage storage, ReplayPlaybackController _)
     {
@@ -265,6 +278,7 @@ public sealed class RunReplayPlaybackController
         Engine.TimeScale = 1.0;
         _controls?.QueueFree();
         _controls = null;
+        ReplayMod.ResetRuntimeMode();
         if (RunManager.Instance.IsInProgress) RunManager.Instance.CleanUp();
         NGame.Instance!.RootSceneContainer.SetCurrentScene(MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NMainMenu.Create(openTimeline: false));
     }

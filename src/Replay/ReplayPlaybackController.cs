@@ -196,6 +196,7 @@ public sealed class ReplayPlaybackController
         Engine.TimeScale = 1.0;
         _controls?.QueueFree();
         _controls = null;
+        ReplayMod.ResetRuntimeMode();
         if (RunManager.Instance.IsInProgress) RunManager.Instance.CleanUp();
         NGame.Instance!.RootSceneContainer.SetCurrentScene(NMainMenu.Create(openTimeline: false));
     }

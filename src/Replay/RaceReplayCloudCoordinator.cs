@@ -120,6 +120,7 @@ public static class RaceReplayCloudCoordinator
             await UploadGate.WaitAsync(lifetime.Token);
             try
             {
+                ReplayMod.Recorder.PrepareForCloudUpload();
                 byte[] bundle = ReplayMod.Storage.CreateRunBundle(run);
                 var summary = new RaceReplaySummary(run.MatchId, run.GameId, run.PlayerId, string.Empty, run.TeamId,
                     run.RunId, run.Character, run.EventCount, run.Outcome != "IN_PROGRESS", run.Outcome == "IN_PROGRESS",

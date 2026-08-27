@@ -9,6 +9,7 @@ using MegaCrit.Sts2.Core.Nodes.Debug;
 using MegaCrit.Sts2.Core.Runs;
 using Sts2SpireRace.Core;
 using Sts2SpireRace.UI;
+using Sts2SpireRace.Replay;
 
 namespace Sts2SpireRace.Game;
 
@@ -79,6 +80,7 @@ public sealed partial class RaceRunIntegration : Node
                 EventSlUsed = RaceTelemetrySequence.EventSlUsed(match.GameId),
                 CombatSlUsed = RaceTelemetrySequence.CombatSlUsed(match.GameId)
             };
+            ReplayMod.Recorder?.UpdateRaceSlUsage(_checkpoint.EventSlUsed, _checkpoint.CombatSlUsed);
             _ = _matches.ResumeSavedRunAsync($"resume:{match.GameId}:{Guid.NewGuid():N}");
         }
         RunManager.Instance.RoomEntered += OnRoomEntered;

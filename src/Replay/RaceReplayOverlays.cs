@@ -1,6 +1,7 @@
 using Godot;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Nodes;
+using Sts2SpireRace.Core;
 using Sts2SpireRace.Game;
 using Sts2SpireRace.UI;
 
@@ -26,19 +27,19 @@ public sealed partial class ReplayControlsOverlay : CanvasLayer
 
     private void Build()
     {
-        var panel = RaceUiAssets.Panel(new Color("263f43"), 16);
+        var panel = RaceUiAssets.Panel(new Color(0.149f, 0.247f, 0.263f, 0.78f), 16);
         panel.SetAnchorsPreset(Control.LayoutPreset.BottomWide);
-        panel.OffsetLeft = 70;
-        panel.OffsetRight = -70;
-        panel.OffsetTop = -132;
-        panel.OffsetBottom = -18;
+        panel.OffsetLeft = 150;
+        panel.OffsetRight = -150;
+        panel.OffsetTop = -112;
+        panel.OffsetBottom = -14;
         AddChild(panel);
 
         var root = new VBoxContainer();
-        root.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect, Control.LayoutPresetMode.KeepSize, 12);
-        root.AddThemeConstantOverride("separation", 7);
+        root.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect, Control.LayoutPresetMode.KeepSize, 9);
+        root.AddThemeConstantOverride("separation", 5);
         panel.AddChild(root);
-        _state = RaceUiAssets.Label(string.Empty, 18, StsColors.gold, HorizontalAlignment.Center, true);
+        _state = RaceUiAssets.Label(string.Empty, 16, StsColors.gold, HorizontalAlignment.Center, true);
         root.AddChild(_state);
         var actions = ActionRow();
         _playPause = AddButton(actions, RaceTextCatalog.Get("replay.play"), () =>
@@ -63,6 +64,13 @@ public sealed partial class ReplayControlsOverlay : CanvasLayer
         _state.SetTextAutoSize(RaceTextCatalog.Format("replay.state", marker + 1, count, label, speed));
     }
 
+    public override void _UnhandledInput(InputEvent input)
+    {
+        if (!input.IsActionPressed("ui_cancel")) return;
+        GetViewport().SetInputAsHandled();
+        _controller.ExitToMainMenu();
+    }
+
     private static HBoxContainer ActionRow() => new()
     {
         Alignment = BoxContainer.AlignmentMode.Center,
@@ -71,7 +79,7 @@ public sealed partial class ReplayControlsOverlay : CanvasLayer
 
     private static RaceTextureButton AddButton(Container row, string text, Action action)
     {
-        var button = RaceUiAssets.Button(text, action, 15, new Vector2(100, 38));
+        var button = RaceUiAssets.Button(text, action, 14, new Vector2(88, 34));
         row.AddChild(button);
         return button;
     }
@@ -81,13 +89,13 @@ public sealed partial class ReplayControlsOverlay : CanvasLayer
         foreach (var speed in new[] { 0.5, 1.0, 2.0, 4.0 })
         {
             var captured = speed;
-            AddButton(row, $"{speed:0.#}×", () => setSpeed(captured), 60);
+            AddButton(row, $"{speed:0.#}×", () => setSpeed(captured), 54);
         }
     }
 
     private static RaceTextureButton AddButton(Container row, string text, Action action, float width)
     {
-        var button = RaceUiAssets.Button(text, action, 15, new Vector2(width, 38));
+        var button = RaceUiAssets.Button(text, action, 14, new Vector2(width, 34));
         row.AddChild(button);
         return button;
     }
@@ -100,6 +108,8 @@ public sealed partial class RunReplayControlsOverlay : CanvasLayer
     private RaceTextureButton _playPause = null!;
     private double _guardElapsed;
     private MegaCrit.Sts2.addons.mega_text.MegaLabel? _target;
+    private MegaCrit.Sts2.addons.mega_text.MegaLabel _raceState = null!;
+    private int _floor;
 
     public static RunReplayControlsOverlay Create(RunReplayPlaybackController controller)
     {
@@ -110,26 +120,27 @@ public sealed partial class RunReplayControlsOverlay : CanvasLayer
 
     private void Build()
     {
-        var panel = RaceUiAssets.Panel(new Color("263f43"), 16);
+        BuildRaceHud();
+        var panel = RaceUiAssets.Panel(new Color(0.149f, 0.247f, 0.263f, 0.78f), 16);
         panel.SetAnchorsPreset(Control.LayoutPreset.BottomWide);
-        panel.OffsetLeft = 70;
-        panel.OffsetRight = -70;
-        panel.OffsetTop = RaceReplayCloudCoordinator.CanSwitchLiveTarget ? -182 : -140;
-        panel.OffsetBottom = -18;
+        panel.OffsetLeft = 130;
+        panel.OffsetRight = -130;
+        panel.OffsetTop = RaceReplayCloudCoordinator.CanSwitchLiveTarget ? -154 : -118;
+        panel.OffsetBottom = -14;
         AddChild(panel);
         var root = new VBoxContainer();
-        root.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect, Control.LayoutPresetMode.KeepSize, 12);
-        root.AddThemeConstantOverride("separation", 7);
+        root.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect, Control.LayoutPresetMode.KeepSize, 9);
+        root.AddThemeConstantOverride("separation", 5);
         panel.AddChild(root);
-        _state = RaceUiAssets.Label(string.Empty, 18, StsColors.gold, HorizontalAlignment.Center, true);
+        _state = RaceUiAssets.Label(string.Empty, 16, StsColors.gold, HorizontalAlignment.Center, true);
         root.AddChild(_state);
         if (RaceReplayCloudCoordinator.CanSwitchLiveTarget)
         {
             var targets = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
             AddButton(targets, RaceTextCatalog.Get("spectate.previous_target"), () =>
                 TaskHelper.RunSafely(RaceReplayCloudCoordinator.SwitchLiveTargetAsync(-1)), 150);
-            _target = RaceUiAssets.Label(RaceReplayCloudCoordinator.CurrentLiveTarget, 17, StsColors.gold, HorizontalAlignment.Center, true);
-            _target.CustomMinimumSize = new Vector2(320, 38);
+            _target = RaceUiAssets.Label(RaceReplayCloudCoordinator.CurrentLiveTarget, 15, StsColors.gold, HorizontalAlignment.Center, true);
+            _target.CustomMinimumSize = new Vector2(280, 34);
             targets.AddChild(_target);
             AddButton(targets, RaceTextCatalog.Get("spectate.next_target"), () =>
                 TaskHelper.RunSafely(RaceReplayCloudCoordinator.SwitchLiveTargetAsync(1)), 150);
@@ -156,26 +167,60 @@ public sealed partial class RunReplayControlsOverlay : CanvasLayer
         _playPause.GrabFocus();
     }
 
+    private void BuildRaceHud()
+    {
+        var panel = RaceUiAssets.Panel(new Color(0.09f, 0.224f, 0.259f, 0.88f), 12);
+        panel.SetAnchorsPreset(Control.LayoutPreset.TopWide);
+        panel.OffsetLeft = 400;
+        panel.OffsetRight = -400;
+        panel.OffsetTop = 150;
+        panel.OffsetBottom = 202;
+        AddChild(panel);
+        _raceState = RaceUiAssets.Label(string.Empty, 18, StsColors.gold, HorizontalAlignment.Center, true);
+        _raceState.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect, Control.LayoutPresetMode.KeepSize, 6);
+        panel.AddChild(_raceState);
+    }
+
     public override void _Process(double delta)
     {
         _guardElapsed += delta;
         if (_guardElapsed < 0.1) return;
         _guardElapsed = 0;
         if (NRun.Instance is not null) ReplayUiInteractionPolicy.ApplyReadOnlyState(NRun.Instance);
+        RefreshRaceHud();
+    }
+
+    public override void _UnhandledInput(InputEvent input)
+    {
+        if (!input.IsActionPressed("ui_cancel")) return;
+        GetViewport().SetInputAsHandled();
+        _controller.Exit();
     }
 
     public void UpdateState(bool playing, RunReplayMarker checkpoint, int checkpointCount,
         int eventIndex, int eventCount, long elapsedMs, long durationMs, string label, double speed, bool canTakeOver)
     {
+        _floor = checkpoint.Floor;
         _target?.SetTextAutoSize(RaceReplayCloudCoordinator.CurrentLiveTarget);
         _playPause.SetText(RaceTextCatalog.Get(playing ? "replay.pause_after_action" : "replay.play"));
         _state.SetTextAutoSize(RaceTextCatalog.Format("replay.run_state", FormatTime(elapsedMs), FormatTime(durationMs),
             checkpoint.Act, checkpoint.Floor, label, eventIndex, eventCount, checkpoint.Index + 1, checkpointCount, speed));
+        RefreshRaceHud();
+    }
+
+    private void RefreshRaceHud()
+    {
+        var run = _controller.CurrentRun;
+        var eventRemaining = Math.Max(0, (run?.EventSlLimit ?? 0) - (run?.EventSlUsed ?? 0));
+        var combatRemaining = Math.Max(0, (run?.CombatSlLimit ?? 0) - (run?.CombatSlUsed ?? 0));
+        var target = RaceReplayCloudCoordinator.CurrentLiveTarget;
+        var targetPrefix = string.IsNullOrWhiteSpace(target) ? string.Empty : $"{target}     ";
+        _raceState.SetTextAutoSize($"RACE  {targetPrefix}{RaceRules.FormatElapsed(_controller.DisplayRaceElapsedMs)}     F{_floor}     A{run?.Ascension ?? 0}     SL  {eventRemaining}E / {combatRemaining}C");
     }
 
     private static RaceTextureButton AddButton(Container row, string text, Action action, float width = 100)
     {
-        var button = RaceUiAssets.Button(text, action, 16, new Vector2(width, 38));
+        var button = RaceUiAssets.Button(text, action, 14, new Vector2(width, 34));
         row.AddChild(button);
         return button;
     }

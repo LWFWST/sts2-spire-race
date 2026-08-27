@@ -189,6 +189,53 @@ public sealed class ReplayRecorderCoordinator
         AppendInput(kind, label, payload, _operationIndex);
     }
 
+    public void UpdateRaceSlUsage(int eventSlUsed, int combatSlUsed)
+    {
+        if (_run == null) return;
+        _run.EventSlUsed = Math.Max(0, eventSlUsed);
+        _run.CombatSlUsed = Math.Max(0, combatSlUsed);
+        RefreshRaceSnapshot();
+        PersistManifests();
+        CheckpointRecorded?.Invoke(_run);
+    }
+
+    public void RefreshRaceSnapshot()
+    {
+        if (_run == null) return;
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var match = RaceActiveSession.Current;
+        if (match is not null)
+        {
+            _run.EventSlLimit = match.Rules.EventSlLimit;
+            _run.CombatSlLimit = match.Rules.CombatSlLimit;
+            _run.EventSlUsed = RaceTelemetrySequence.EventSlUsed(match.GameId);
+            _run.CombatSlUsed = RaceTelemetrySequence.CombatSlUsed(match.GameId);
+        }
+        if (RaceServiceRegistry.Services is IRaceClockService { CurrentClock: { IsSynchronized: true } clock })
+        {
+            _run.RaceElapsedMs = Math.Max(0, clock.ElapsedMilliseconds +
+                (clock.IsPaused ? 0 : now - clock.ServerUnixMilliseconds));
+            _run.RaceTimerPaused = clock.IsPaused;
+        }
+        else if (match is not null)
+        {
+            _run.RaceElapsedMs = Math.Max(0, now - match.StartedAtUnixMilliseconds);
+            _run.RaceTimerPaused = false;
+        }
+        else
+        {
+            _run.RaceElapsedMs = Math.Max(0, now - _runStartedAt);
+            _run.RaceTimerPaused = false;
+        }
+        _run.RaceElapsedUpdatedAtUnixMs = now;
+    }
+
+    public void PrepareForCloudUpload()
+    {
+        RefreshRaceSnapshot();
+        PersistManifests();
+    }
+
     private void OnRunStarted(RunState state)
     {
         AttachRunHooks();
@@ -234,6 +281,7 @@ public sealed class ReplayRecorderCoordinator
             _run.InputFile = ReplayStorage.ToRelativePath(_storage.AbsoluteRoot, inputPath);
             _catalog.Runs.Add(_run);
         }
+        RefreshRaceSnapshot();
         string timelinePath = string.IsNullOrEmpty(_run.TimelineFile)
             ? Path.Combine(_storage.GetRunDirectory(runId), "timeline.json")
             : _storage.ResolveRelativePath(_run.TimelineFile);
@@ -437,6 +485,7 @@ public sealed class ReplayRecorderCoordinator
         if (state == null) return;
         try
         {
+            RefreshRaceSnapshot();
             string? checkpointFile = null;
             string json = JsonSerializationUtility.ToJson(save);
             uint hash = BinaryPrimitives.ReadUInt32LittleEndian(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
@@ -446,7 +495,7 @@ public sealed class ReplayRecorderCoordinator
             RunReplayMarker marker = new()
             {
                 Index = _runTimeline.Markers.Count,
-                ElapsedMs = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _runStartedAt),
+                ElapsedMs = _run.RaceElapsedMs,
                 Act = state.CurrentActIndex + 1,
                 Floor = state.TotalFloor,
                 Room = state.CurrentRoom?.RoomType.ToString() ?? "Map",
@@ -476,10 +525,11 @@ public sealed class ReplayRecorderCoordinator
     private void AppendInput(string kind, string label, string payload, int operation)
     {
         if (_run == null || _inputStream == null) return;
+        RefreshRaceSnapshot();
         RunReplayInputEvent input = new()
         {
             Index = _inputStream.Events.Count,
-            ElapsedMs = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _runStartedAt),
+            ElapsedMs = _run.RaceElapsedMs,
             Operation = operation,
             Kind = kind,
             Label = label,

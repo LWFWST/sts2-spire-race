@@ -48,6 +48,27 @@ public sealed class RunReplayManifest
     [JsonPropertyName("started_at_unix_ms")]
     public long StartedAtUnixMs { get; set; }
 
+    [JsonPropertyName("race_elapsed_ms")]
+    public long RaceElapsedMs { get; set; }
+
+    [JsonPropertyName("race_elapsed_updated_at_unix_ms")]
+    public long RaceElapsedUpdatedAtUnixMs { get; set; }
+
+    [JsonPropertyName("race_timer_paused")]
+    public bool RaceTimerPaused { get; set; }
+
+    [JsonPropertyName("event_sl_limit")]
+    public int EventSlLimit { get; set; }
+
+    [JsonPropertyName("combat_sl_limit")]
+    public int CombatSlLimit { get; set; }
+
+    [JsonPropertyName("event_sl_used")]
+    public int EventSlUsed { get; set; }
+
+    [JsonPropertyName("combat_sl_used")]
+    public int CombatSlUsed { get; set; }
+
     [JsonPropertyName("combats")]
     public List<CombatReplayManifest> Combats { get; set; } = new();
 

@@ -237,6 +237,7 @@ internal static class RacePendingSave
     private static readonly Dictionary<string, SlCategory> PendingGames = [];
     private static readonly object Sync = new();
     public static void Set(string gameId, SlCategory category) { lock (Sync) PendingGames[gameId] = category; }
+    public static bool IsPending(string gameId) { lock (Sync) return PendingGames.ContainsKey(gameId); }
     public static bool TryConsume(string gameId, out SlCategory category)
     {
         lock (Sync)
