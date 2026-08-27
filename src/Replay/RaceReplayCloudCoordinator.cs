@@ -8,6 +8,7 @@ public static class RaceReplayCloudCoordinator
     private static readonly object Gate = new();
     private static readonly SemaphoreSlim UploadGate = new(1, 1);
     private static readonly Dictionary<string, CancellationTokenSource> PendingUploads = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, CancellationTokenSource> LiveUploadLoops = new(StringComparer.Ordinal);
     private static ReplayRecorderCoordinator? _recorder;
     private static IReadOnlyList<RaceReplaySummary> _liveTargets = Array.Empty<RaceReplaySummary>();
     private static int _liveTargetIndex;
@@ -45,12 +46,21 @@ public static class RaceReplayCloudCoordinator
     public static async Task WatchAsync(RaceReplaySummary replay, bool live, CancellationToken cancellationToken = default)
     {
         RunReplayManifest manifest = await DownloadAsync(replay, cancellationToken);
-        await ReplayMod.RunPlayback.StartAsync(manifest);
+        await ReplayMod.RunPlayback.StartAsync(manifest, live ? int.MaxValue : 0);
         if (!live) return;
+        var lastUpdated = replay.UpdatedAt;
+        var lastEventCount = replay.EventCount;
         ReplayMod.RunPlayback.EnableLiveRefresh(async token =>
         {
-            await Task.Delay(750, token);
-            return await DownloadAsync(replay, token);
+            if (RaceServiceRegistry.Services is not IRaceReplayService service)
+                return null;
+            var latest = (await service.GetMatchReplaysAsync(replay.MatchId, token))
+                .FirstOrDefault(x => x.GameId == replay.GameId && x.PlayerId == replay.PlayerId);
+            if (latest is null || (latest.UpdatedAt <= lastUpdated && latest.EventCount <= lastEventCount))
+                return null;
+            lastUpdated = latest.UpdatedAt;
+            lastEventCount = latest.EventCount;
+            return await DownloadAsync(latest, token);
         });
         await ReplayMod.RunPlayback.PlayAsync();
     }
@@ -93,10 +103,63 @@ public static class RaceReplayCloudCoordinator
         finally { Interlocked.Exchange(ref _switchingTarget, 0); }
     }
 
-    private static void OnRunStarted(RunReplayManifest run) => Schedule(run, TimeSpan.Zero);
-    private static void OnInputRecorded(RunReplayManifest run, RunReplayInputEvent input) => Schedule(run, TimeSpan.FromMilliseconds(750));
+    private static void OnRunStarted(RunReplayManifest run)
+    {
+        StartLiveUploadLoop(run);
+        Schedule(run, TimeSpan.Zero);
+    }
+    private static void OnInputRecorded(RunReplayManifest run, RunReplayInputEvent input) => Schedule(run, TimeSpan.FromMilliseconds(200));
     private static void OnCheckpointRecorded(RunReplayManifest run) => Schedule(run, TimeSpan.Zero);
-    private static void OnRunFinalized(RunReplayManifest run) => Schedule(run, TimeSpan.Zero);
+    private static void OnRunFinalized(RunReplayManifest run)
+    {
+        StopLiveUploadLoop(run.RunId);
+        Schedule(run, TimeSpan.Zero);
+    }
+
+    private static void StartLiveUploadLoop(RunReplayManifest run)
+    {
+        if (string.IsNullOrWhiteSpace(run.MatchId) || RaceServiceRegistry.Services.ConfiguredServerUri is null)
+            return;
+        CancellationTokenSource lifetime;
+        lock (Gate)
+        {
+            if (LiveUploadLoops.ContainsKey(run.RunId)) return;
+            lifetime = new CancellationTokenSource();
+            LiveUploadLoops[run.RunId] = lifetime;
+        }
+        _ = LiveUploadLoopAsync(run, lifetime);
+    }
+
+    private static async Task LiveUploadLoopAsync(RunReplayManifest run, CancellationTokenSource lifetime)
+    {
+        try
+        {
+            while (!lifetime.IsCancellationRequested && run.Outcome == "IN_PROGRESS")
+            {
+                await Task.Delay(1000, lifetime.Token);
+                Schedule(run, TimeSpan.Zero);
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            lock (Gate)
+            {
+                if (LiveUploadLoops.TryGetValue(run.RunId, out var current) && ReferenceEquals(current, lifetime))
+                    LiveUploadLoops.Remove(run.RunId);
+            }
+            lifetime.Dispose();
+        }
+    }
+
+    private static void StopLiveUploadLoop(string runId)
+    {
+        lock (Gate)
+        {
+            if (LiveUploadLoops.Remove(runId, out var lifetime))
+                lifetime.Cancel();
+        }
+    }
 
     private static void Schedule(RunReplayManifest run, TimeSpan delay)
     {
@@ -105,7 +168,9 @@ public static class RaceReplayCloudCoordinator
         CancellationTokenSource lifetime;
         lock (Gate)
         {
-            if (PendingUploads.Remove(run.RunId, out var old)) old.Cancel();
+            // Keep the earliest scheduled upload. Repeated actions must not
+            // postpone it indefinitely, which previously starved live viewers.
+            if (PendingUploads.ContainsKey(run.RunId)) return;
             lifetime = new CancellationTokenSource();
             PendingUploads[run.RunId] = lifetime;
         }
@@ -121,7 +186,9 @@ public static class RaceReplayCloudCoordinator
             try
             {
                 ReplayMod.Recorder.PrepareForCloudUpload();
-                byte[] bundle = ReplayMod.Storage.CreateRunBundle(run);
+                byte[] bundle = run.Outcome == "IN_PROGRESS"
+                    ? ReplayMod.Storage.CreateLiveRunBundle(run)
+                    : ReplayMod.Storage.CreateRunBundle(run);
                 var summary = new RaceReplaySummary(run.MatchId, run.GameId, run.PlayerId, string.Empty, run.TeamId,
                     run.RunId, run.Character, run.EventCount, run.Outcome != "IN_PROGRESS", run.Outcome == "IN_PROGRESS",
                     false, DateTimeOffset.UtcNow);

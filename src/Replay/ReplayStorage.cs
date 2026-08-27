@@ -119,6 +119,44 @@ public sealed class ReplayStorage
         return output.ToArray();
     }
 
+    public byte[] CreateLiveRunBundle(RunReplayManifest manifest)
+    {
+        lock (_gate)
+        {
+            RunReplayTimeline timeline = LoadRunTimeline(ResolveRelativePath(manifest.TimelineFile));
+            RunReplayInputStream inputs = LoadInputStream(ResolveRelativePath(manifest.InputFile));
+            RunReplayMarker marker = timeline.Markers.LastOrDefault()
+                ?? throw new InvalidDataException("Live replay has no floor checkpoint.");
+            var liveTimeline = new RunReplayTimeline { RunId = timeline.RunId, Markers = new List<RunReplayMarker> { marker } };
+            using MemoryStream output = new();
+            using (ZipArchive archive = new(output, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                string manifestPath = ToRelativePath(AbsoluteRoot, Path.Combine(GetRunDirectory(manifest.RunId), "run.json"));
+                WriteJsonEntry(archive, manifestPath, manifest);
+                WriteJsonEntry(archive, manifest.TimelineFile, liveTimeline);
+                WriteJsonEntry(archive, manifest.InputFile, inputs);
+                if (!string.IsNullOrEmpty(marker.CheckpointFile))
+                    CopyFileEntry(archive, marker.CheckpointFile, ResolveRelativePath(marker.CheckpointFile));
+            }
+            return output.ToArray();
+        }
+    }
+
+    private static void WriteJsonEntry<T>(ZipArchive archive, string relativePath, T value)
+    {
+        ZipArchiveEntry entry = archive.CreateEntry(relativePath.Replace('\\', '/'), CompressionLevel.Fastest);
+        using Stream target = entry.Open();
+        JsonSerializer.Serialize(target, value, JsonOptions);
+    }
+
+    private static void CopyFileEntry(ZipArchive archive, string relativePath, string absolutePath)
+    {
+        ZipArchiveEntry entry = archive.CreateEntry(relativePath.Replace('\\', '/'), CompressionLevel.Fastest);
+        using Stream target = entry.Open();
+        using FileStream source = File.Open(absolutePath, FileMode.Open, System.IO.FileAccess.Read, FileShare.ReadWrite);
+        source.CopyTo(target);
+    }
+
     public RunReplayManifest ImportRunBundle(byte[] bundle)
     {
         string root = Path.GetFullPath(AbsoluteRoot) + Path.DirectorySeparatorChar;

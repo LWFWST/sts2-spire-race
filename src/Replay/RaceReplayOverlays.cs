@@ -204,7 +204,8 @@ public sealed partial class RunReplayControlsOverlay : CanvasLayer
         _target?.SetTextAutoSize(RaceReplayCloudCoordinator.CurrentLiveTarget);
         _playPause.SetText(RaceTextCatalog.Get(playing ? "replay.pause_after_action" : "replay.play"));
         _state.SetTextAutoSize(RaceTextCatalog.Format("replay.run_state", FormatTime(elapsedMs), FormatTime(durationMs),
-            checkpoint.Act, checkpoint.Floor, label, eventIndex, eventCount, checkpoint.Index + 1, checkpointCount, speed));
+            checkpoint.Act, checkpoint.Floor, label, eventIndex, eventCount,
+            Math.Clamp(checkpoint.Index + 1, 1, Math.Max(1, checkpointCount)), checkpointCount, speed));
         RefreshRaceHud();
     }
 

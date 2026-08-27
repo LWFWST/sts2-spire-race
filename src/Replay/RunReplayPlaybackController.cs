@@ -92,7 +92,7 @@ public sealed class RunReplayPlaybackController
         _storage = storage;
     }
 
-    public async Task StartAsync(RunReplayManifest run)
+    public async Task StartAsync(RunReplayManifest run, int initialMarkerIndex = 0)
     {
         if (!CompatibilityService.IsCompatible(run.Compatibility, out string reason))
             throw new InvalidOperationException("Run replay is locked: " + reason);
@@ -104,7 +104,7 @@ public sealed class RunReplayPlaybackController
         _timeline = _storage.LoadRunTimeline(_storage.ResolveRelativePath(run.TimelineFile));
         _inputs = _storage.LoadInputStream(_storage.ResolveRelativePath(run.InputFile));
         if (_timeline.Markers.Count == 0) throw new InvalidDataException("Run replay has no floor checkpoints.");
-        await SeekAsync(0);
+        await SeekAsync(Math.Clamp(initialMarkerIndex, 0, _timeline.Markers.Count - 1));
         ShowControls();
     }
 
@@ -162,14 +162,14 @@ public sealed class RunReplayPlaybackController
                 catch (OperationCanceledException) { break; }
                 if (updated is null)
                 {
-                    await Task.Delay(750, liveToken);
+                    await Task.Delay(250, liveToken);
                     continue;
                 }
                 _run = updated;
                 _timeline = _storage.LoadRunTimeline(_storage.ResolveRelativePath(updated.TimelineFile));
                 _inputs = _storage.LoadInputStream(_storage.ResolveRelativePath(updated.InputFile));
                 if (_nextEventIndex < _inputs.Events.Count) ResumeRuntime();
-                else await Task.Delay(750, liveToken);
+                else await Task.Delay(250, liveToken);
             }
         }
         finally
