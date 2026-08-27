@@ -107,6 +107,27 @@ func (p *Postgres) ReplayBundle(ctx context.Context, requesterID, matchID, gameI
 	return bundle, err
 }
 
+func (p *Postgres) CanPublishReplay(ctx context.Context, playerID, matchID, gameID string) (bool, error) {
+	var allowed bool
+	err := p.Pool.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM match_participants WHERE match_id=$1 AND player_id=$2
+	)`, matchID, playerID).Scan(&allowed)
+	return allowed, err
+}
+
+func (p *Postgres) CanViewReplay(ctx context.Context, requesterID, matchID, gameID, playerID string) (bool, error) {
+	var allowed bool
+	err := p.Pool.QueryRow(ctx, `SELECT
+		EXISTS(SELECT 1 FROM match_participants WHERE match_id=$1 AND player_id=$3) AND (
+		EXISTS(SELECT 1 FROM match_participants WHERE match_id=$1 AND player_id=$2) OR
+		EXISTS(SELECT 1 FROM friendships f WHERE f.state='accepted' AND
+			((f.requester_id=$2 AND f.addressee_id=$3) OR (f.addressee_id=$2 AND f.requester_id=$3))) OR
+		EXISTS(SELECT 1 FROM entertainment_room_spectators s WHERE ('fun-'||trim(s.code))=$1 AND s.player_id=$2) OR
+		EXISTS(SELECT 1 FROM matches m WHERE m.id=$1 AND m.kind='ranked' AND COALESCE((m.payload->>'legend_series')::boolean,false)))`,
+		matchID, requesterID, playerID).Scan(&allowed)
+	return allowed, err
+}
+
 func (p *Postgres) SpectatableReplays(ctx context.Context, requesterID string) ([]SpectatableReplayRow, error) {
 	rows, err := p.Pool.Query(ctx, `SELECT r.match_id,r.game_id,r.player_id,p.display_name,r.character_id,m.kind,
 		EXISTS(SELECT 1 FROM friendships f WHERE f.state='accepted' AND ((f.requester_id=$1 AND f.addressee_id=r.player_id) OR (f.addressee_id=$1 AND f.requester_id=r.player_id))),

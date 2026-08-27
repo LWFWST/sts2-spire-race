@@ -261,6 +261,18 @@ func TestReplayCloudAndEntertainmentSpectatorPermissions(t *testing.T) {
 	if _, err := store.ReplayBundle(ctx, players[3], matchID, a.GameID, players[0]); err == nil {
 		t.Fatal("unrelated player downloaded a private replay")
 	}
+	if allowed, err := store.CanPublishReplay(ctx, players[0], matchID, a.GameID); err != nil || !allowed {
+		t.Fatalf("match participant could not publish live actions: allowed=%v err=%v", allowed, err)
+	}
+	if allowed, err := store.CanPublishReplay(ctx, players[3], matchID, a.GameID); err != nil || allowed {
+		t.Fatalf("outsider live publication was not rejected: allowed=%v err=%v", allowed, err)
+	}
+	if allowed, err := store.CanViewReplay(ctx, players[2], matchID, a.GameID, players[0]); err != nil || !allowed {
+		t.Fatalf("room spectator could not subscribe to live actions: allowed=%v err=%v", allowed, err)
+	}
+	if allowed, err := store.CanViewReplay(ctx, players[3], matchID, a.GameID, players[0]); err != nil || allowed {
+		t.Fatalf("outsider live subscription was not rejected: allowed=%v err=%v", allowed, err)
+	}
 }
 
 func filterRoomTeam(members []EntertainmentRoomMember, team int) []EntertainmentRoomMember {

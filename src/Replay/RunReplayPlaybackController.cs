@@ -126,21 +126,24 @@ public sealed class RunReplayPlaybackController
         {
             while (true)
             {
-                while (_nextEventIndex < _inputs.Events.Count)
+                while (_inputs is { } inputs && _nextEventIndex < inputs.Events.Count)
                 {
-                    RunReplayInputEvent input = _inputs.Events[_nextEventIndex];
-                    long priorTime = _nextEventIndex == 0 ? CurrentCheckpoint.ElapsedMs : _inputs.Events[_nextEventIndex - 1].ElapsedMs;
-                    await DelayRecordedIntervalAsync(Math.Max(0, input.ElapsedMs - priorTime));
+                    RunReplayInputEvent input = inputs.Events[_nextEventIndex];
+                    long priorTime = _nextEventIndex == 0 ? CurrentCheckpoint.ElapsedMs : inputs.Events[_nextEventIndex - 1].ElapsedMs;
+                    bool catchingUp = _liveRefresh is not null && DisplayRaceElapsedMs - input.ElapsedMs > 350;
+                    if (catchingUp) Engine.TimeScale = Math.Max(_speed, 8.0);
+                    await DelayRecordedIntervalAsync(Math.Max(0, input.ElapsedMs - priorTime), input.ElapsedMs);
                     await DeliverInputAsync(input);
                     _nextEventIndex++;
                     _displayElapsedMs = input.ElapsedMs;
                     UpdateCheckpointIndex();
                     UpdateControls();
-                    bool groupEnded = _nextEventIndex >= _inputs.Events.Count ||
-                        _inputs.Events[_nextEventIndex].Operation != input.Operation;
+                    bool groupEnded = _nextEventIndex >= inputs.Events.Count ||
+                        inputs.Events[_nextEventIndex].Operation != input.Operation;
                     if (groupEnded)
                     {
                         await WaitForStableAsync();
+                        Engine.TimeScale = _speed;
                         if (_pauseRequested)
                         {
                             PauseRuntime();
@@ -162,14 +165,16 @@ public sealed class RunReplayPlaybackController
                 catch (OperationCanceledException) { break; }
                 if (updated is null)
                 {
-                    await Task.Delay(250, liveToken);
                     continue;
                 }
+                int loadedEventCount = _inputs?.Events.Count ?? 0;
+                int loadedMarkerCount = _timeline?.Markers.Count ?? 0;
                 _run = updated;
-                _timeline = _storage.LoadRunTimeline(_storage.ResolveRelativePath(updated.TimelineFile));
-                _inputs = _storage.LoadInputStream(_storage.ResolveRelativePath(updated.InputFile));
-                if (_nextEventIndex < _inputs.Events.Count) ResumeRuntime();
-                else await Task.Delay(250, liveToken);
+                if (updated.MarkerCount > loadedMarkerCount)
+                    _timeline = _storage.LoadRunTimeline(_storage.ResolveRelativePath(updated.TimelineFile));
+                if (updated.EventCount > loadedEventCount)
+                    _inputs = _storage.LoadInputStream(_storage.ResolveRelativePath(updated.InputFile));
+                if (_inputs is not null && _nextEventIndex < _inputs.Events.Count) ResumeRuntime();
             }
         }
         finally
@@ -783,9 +788,15 @@ public sealed class RunReplayPlaybackController
         return false;
     }
 
-    private async Task DelayRecordedIntervalAsync(long recordedMs)
+    private async Task DelayRecordedIntervalAsync(long recordedMs, long inputElapsedMs)
     {
-        long remaining = Math.Min(30000, (long)(recordedMs / _speed));
+        // A live viewer already spent this interval waiting for the source
+        // player. Replaying the recorded delay after the event arrives doubles
+        // latency. Only wait if the source clock says the event is still ahead.
+        long delayMs = _liveRefresh is null
+            ? recordedMs
+            : Math.Max(0, inputElapsedMs - DisplayRaceElapsedMs);
+        long remaining = Math.Min(30000, (long)(delayMs / _speed));
         while (remaining > 0 && !_pauseRequested)
         {
             int slice = (int)Math.Min(remaining, 33);

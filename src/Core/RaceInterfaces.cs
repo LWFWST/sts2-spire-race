@@ -88,7 +88,11 @@ public interface IRaceEntertainmentRoomService
 
 public interface IRaceReplayService
 {
+    event Action<RaceReplayLiveBatch>? ReplayLiveUpdated;
     Task UploadReplayAsync(RaceReplaySummary replay, byte[] bundle, CancellationToken cancellationToken = default);
+    Task PublishReplayLiveAsync(RaceReplayLiveBatch batch, CancellationToken cancellationToken = default);
+    Task SubscribeReplayLiveAsync(string matchId, string gameId, string playerId, CancellationToken cancellationToken = default);
+    Task UnsubscribeReplayLiveAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<RaceReplaySummary>> GetMatchReplaysAsync(string matchId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<SpectatableRace>> GetSpectatableRacesAsync(CancellationToken cancellationToken = default);
     Task<byte[]> DownloadReplayAsync(string matchId, string gameId, string playerId, CancellationToken cancellationToken = default);

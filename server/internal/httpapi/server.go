@@ -42,6 +42,50 @@ type Server struct {
 	steamAllowlist map[string]bool
 	roomLobbyMu    sync.Mutex
 	roomLobbies    map[string]map[int]string
+	replayMu       sync.RWMutex
+	replayWatches  map[string]replayWatch
+	replayStreams  map[string]*replayLiveStream
+}
+
+type replayWatch struct {
+	MatchID  string `json:"match_id"`
+	GameID   string `json:"game_id"`
+	PlayerID string `json:"player_id"`
+}
+
+type replayLiveEvent struct {
+	Index     int    `json:"index"`
+	ElapsedMS int64  `json:"elapsed_ms"`
+	Operation int    `json:"operation"`
+	Kind      string `json:"kind"`
+	Label     string `json:"label"`
+	Payload   string `json:"payload"`
+}
+
+type replayLiveBatch struct {
+	MatchID                    string            `json:"match_id"`
+	GameID                     string            `json:"game_id"`
+	PlayerID                   string            `json:"player_id"`
+	TeamID                     string            `json:"team_id"`
+	RunID                      string            `json:"run_id"`
+	CharacterID                string            `json:"character_id"`
+	EventCount                 int               `json:"event_count"`
+	RaceElapsedMS              int64             `json:"race_elapsed_ms"`
+	RaceElapsedUpdatedAtUnixMS int64             `json:"race_elapsed_updated_at_unix_ms"`
+	RaceTimerPaused            bool              `json:"race_timer_paused"`
+	EventSLLimit               int               `json:"event_sl_limit"`
+	CombatSLLimit              int               `json:"combat_sl_limit"`
+	EventSLUsed                int               `json:"event_sl_used"`
+	CombatSLUsed               int               `json:"combat_sl_used"`
+	MarkerCount                int               `json:"marker_count"`
+	Completed                  bool              `json:"completed"`
+	Events                     []replayLiveEvent `json:"events"`
+}
+
+type replayLiveStream struct {
+	Latest    replayLiveBatch
+	Events    map[int]replayLiveEvent
+	UpdatedAt time.Time
 }
 
 type partyState struct {
@@ -59,7 +103,7 @@ func New(tokens *auth.Manager, steam auth.SteamVerifier, store *storage.Postgres
 		Mux: http.NewServeMux(), Tokens: tokens, Steam: steam, Store: store, Queue: queue, Integrity: integrityService,
 		queueByPlayer: map[string]domain.QueueRequest{}, parties: map[string]*partyState{}, partyByPlayer: map[string]string{},
 		officialServer: officialServer, steamAllowlist: steamAllowlist,
-		roomLobbies: map[string]map[int]string{},
+		roomLobbies: map[string]map[int]string{}, replayWatches: map[string]replayWatch{}, replayStreams: map[string]*replayLiveStream{},
 	}
 	s.Matches = match.New(store, nil)
 	s.Hub = realtime.NewHub(s.onDisconnect)
@@ -1069,7 +1113,13 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Matches.Reconnected(claims.PlayerID)
 	s.Hub.Attach(claims.PlayerID, conn)
-	defer func() { s.Hub.Detach(claims.PlayerID, conn); _ = conn.Close() }()
+	defer func() {
+		s.replayMu.Lock()
+		delete(s.replayWatches, claims.PlayerID)
+		s.replayMu.Unlock()
+		s.Hub.Detach(claims.PlayerID, conn)
+		_ = conn.Close()
+	}()
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 		_, raw, err := conn.ReadMessage()
@@ -1087,6 +1137,85 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		case "heartbeat":
 			_ = s.Queue.TouchPresence(r.Context(), claims.PlayerID)
 			_ = s.Hub.Send(claims.PlayerID, "clock", s.Matches.ClockForPlayer(claims.PlayerID))
+		case "replay_subscribe":
+			var body replayWatch
+			if json.Unmarshal(header.Data, &body) != nil || body.MatchID == "" || body.GameID == "" || body.PlayerID == "" {
+				_ = s.Hub.Send(claims.PlayerID, "error", "invalid replay subscription")
+				continue
+			}
+			allowed, viewErr := s.Store.CanViewReplay(r.Context(), claims.PlayerID, body.MatchID, body.GameID, body.PlayerID)
+			if viewErr != nil || !allowed {
+				_ = s.Hub.Send(claims.PlayerID, "error", "replay subscription is not authorized")
+				continue
+			}
+			s.replayMu.Lock()
+			s.replayWatches[claims.PlayerID] = body
+			backlog := s.replayBacklogLocked(body)
+			s.replayMu.Unlock()
+			_ = s.Hub.Send(claims.PlayerID, "replay_subscribed", body)
+			for _, batch := range backlog {
+				_ = s.Hub.Send(claims.PlayerID, "replay_live_batch", batch)
+			}
+		case "replay_unsubscribe":
+			s.replayMu.Lock()
+			delete(s.replayWatches, claims.PlayerID)
+			s.replayMu.Unlock()
+		case "replay_live_batch":
+			var body replayLiveBatch
+			if json.Unmarshal(header.Data, &body) != nil || body.MatchID == "" || body.GameID == "" ||
+				body.TeamID == "" || body.RunID == "" || body.EventCount < 0 || len(body.Events) > 256 {
+				_ = s.Hub.Send(claims.PlayerID, "error", "invalid live replay batch")
+				continue
+			}
+			allowed, publishErr := s.Store.CanPublishReplay(r.Context(), claims.PlayerID, body.MatchID, body.GameID)
+			if publishErr != nil || !allowed {
+				_ = s.Hub.Send(claims.PlayerID, "error", "live replay publication is not authorized")
+				continue
+			}
+			body.PlayerID = claims.PlayerID
+			valid := true
+			for _, event := range body.Events {
+				if event.Index < 0 || event.Index >= body.EventCount || len(event.Kind) > 64 || len(event.Label) > 512 || len(event.Payload) > 512*1024 {
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				_ = s.Hub.Send(claims.PlayerID, "error", "invalid live replay event")
+				continue
+			}
+			s.replayMu.Lock()
+			now := time.Now()
+			for streamKey, candidate := range s.replayStreams {
+				if now.Sub(candidate.UpdatedAt) > 4*time.Hour {
+					delete(s.replayStreams, streamKey)
+				}
+			}
+			key := replayStreamKey(body.MatchID, body.GameID, claims.PlayerID)
+			stream := s.replayStreams[key]
+			if stream == nil {
+				stream = &replayLiveStream{Events: map[int]replayLiveEvent{}}
+				s.replayStreams[key] = stream
+			}
+			stream.Latest = body
+			stream.Latest.Events = nil
+			stream.UpdatedAt = now
+			for _, event := range body.Events {
+				stream.Events[event.Index] = event
+			}
+			viewers := make([]string, 0)
+			for viewerID, watch := range s.replayWatches {
+				if watch.MatchID == body.MatchID && watch.GameID == body.GameID && watch.PlayerID == claims.PlayerID {
+					viewers = append(viewers, viewerID)
+				}
+			}
+			s.replayMu.Unlock()
+			s.Hub.Broadcast(viewers, "replay_live_batch", body)
+			if body.Completed {
+				s.replayMu.Lock()
+				delete(s.replayStreams, key)
+				s.replayMu.Unlock()
+			}
 		case "party_open":
 			var body struct {
 				Kind     string `json:"kind"`
@@ -1260,6 +1389,48 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func replayStreamKey(matchID, gameID, playerID string) string {
+	return matchID + "\x00" + gameID + "\x00" + playerID
+}
+
+// replayBacklogLocked returns small ordered batches so a spectator joining in
+// the middle of a floor can catch up from the persisted floor checkpoint. The
+// caller holds replayMu, preventing a publication gap between snapshotting the
+// backlog and registering the watcher.
+func (s *Server) replayBacklogLocked(watch replayWatch) []replayLiveBatch {
+	stream := s.replayStreams[replayStreamKey(watch.MatchID, watch.GameID, watch.PlayerID)]
+	if stream == nil {
+		return nil
+	}
+	const maxEventsPerBatch = 64
+	result := make([]replayLiveBatch, 0, (len(stream.Events)+maxEventsPerBatch-1)/maxEventsPerBatch+1)
+	chunk := make([]replayLiveEvent, 0, maxEventsPerBatch)
+	for index := 0; index < stream.Latest.EventCount; index++ {
+		event, ok := stream.Events[index]
+		if !ok {
+			continue
+		}
+		chunk = append(chunk, event)
+		if len(chunk) == maxEventsPerBatch {
+			batch := stream.Latest
+			batch.EventCount = chunk[len(chunk)-1].Index + 1
+			batch.Events = append([]replayLiveEvent(nil), chunk...)
+			result = append(result, batch)
+			chunk = chunk[:0]
+		}
+	}
+	if len(chunk) > 0 {
+		batch := stream.Latest
+		batch.EventCount = chunk[len(chunk)-1].Index + 1
+		batch.Events = append([]replayLiveEvent(nil), chunk...)
+		result = append(result, batch)
+	}
+	latest := stream.Latest
+	latest.Events = []replayLiveEvent{}
+	result = append(result, latest)
+	return result
 }
 
 func decode(w http.ResponseWriter, r *http.Request, target any) bool {

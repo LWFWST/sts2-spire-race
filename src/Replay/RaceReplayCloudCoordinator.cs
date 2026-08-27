@@ -1,5 +1,6 @@
 using MegaCrit.Sts2.Core.Logging;
 using Sts2SpireRace.Core;
+using System.Collections.Concurrent;
 
 namespace Sts2SpireRace.Replay;
 
@@ -7,6 +8,13 @@ public static class RaceReplayCloudCoordinator
 {
     private static readonly object Gate = new();
     private static readonly SemaphoreSlim UploadGate = new(1, 1);
+    private static readonly SemaphoreSlim LivePublishGate = new(1, 1);
+    private static readonly SemaphoreSlim LiveInboxSignal = new(0, int.MaxValue);
+    private static readonly ConcurrentQueue<RaceReplayLiveBatch> LiveInbox = new();
+    private static readonly SortedDictionary<int, RaceReplayLiveEvent> PendingLiveEvents = new();
+    private static int _latestLiveReportedCount;
+    private static bool _latestLiveCompleted;
+    private static long _lastLiveResubscribeAt;
     private static readonly Dictionary<string, CancellationTokenSource> PendingUploads = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, CancellationTokenSource> LiveUploadLoops = new(StringComparer.Ordinal);
     private static ReplayRecorderCoordinator? _recorder;
@@ -45,24 +53,106 @@ public static class RaceReplayCloudCoordinator
 
     public static async Task WatchAsync(RaceReplaySummary replay, bool live, CancellationToken cancellationToken = default)
     {
-        RunReplayManifest manifest = await DownloadAsync(replay, cancellationToken);
-        await ReplayMod.RunPlayback.StartAsync(manifest, live ? int.MaxValue : 0);
-        if (!live) return;
-        var lastUpdated = replay.UpdatedAt;
-        var lastEventCount = replay.EventCount;
-        ReplayMod.RunPlayback.EnableLiveRefresh(async token =>
+        if (!live)
         {
-            if (RaceServiceRegistry.Services is not IRaceReplayService service)
+            RunReplayManifest completed = await DownloadAsync(replay, cancellationToken);
+            await ReplayMod.RunPlayback.StartAsync(completed);
+            return;
+        }
+
+        if (RaceServiceRegistry.Services is not IRaceReplayService service)
+            throw new InvalidOperationException("Replay cloud service is unavailable.");
+        while (LiveInbox.TryDequeue(out _)) { }
+        while (LiveInboxSignal.Wait(0)) { }
+        PendingLiveEvents.Clear();
+        _latestLiveReportedCount = 0;
+        _latestLiveCompleted = false;
+        _lastLiveResubscribeAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        void OnLiveBatch(RaceReplayLiveBatch batch)
+        {
+            if (batch.MatchId != replay.MatchId || batch.GameId != replay.GameId || batch.PlayerId != replay.PlayerId)
+                return;
+            LiveInbox.Enqueue(batch);
+            LiveInboxSignal.Release();
+        }
+
+        service.ReplayLiveUpdated += OnLiveBatch;
+        try
+        {
+            // Subscribe before taking the snapshot. Reliable WebSocket batches that
+            // race with the download are queued and de-duplicated by event index.
+            await service.SubscribeReplayLiveAsync(replay.MatchId, replay.GameId, replay.PlayerId, cancellationToken);
+            RunReplayManifest manifest = await DownloadAsync(replay, cancellationToken);
+            await ReplayMod.RunPlayback.StartAsync(manifest, int.MaxValue);
+            ReplayMod.RunPlayback.EnableLiveRefresh(token => RefreshLiveAsync(service, replay, manifest, token));
+            await ReplayMod.RunPlayback.PlayAsync();
+        }
+        finally
+        {
+            service.ReplayLiveUpdated -= OnLiveBatch;
+            try { await service.UnsubscribeReplayLiveAsync(CancellationToken.None); }
+            catch (Exception exception) { Log.Warn($"[SpireRaceReplay] Could not unsubscribe live replay: {exception.Message}"); }
+        }
+    }
+
+    private static async Task<RunReplayManifest?> RefreshLiveAsync(IRaceReplayService service, RaceReplaySummary replay,
+        RunReplayManifest manifest, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            while (LiveInbox.TryDequeue(out RaceReplayLiveBatch? batch))
+            {
+                if (batch.MatchId != replay.MatchId || batch.GameId != replay.GameId || batch.PlayerId != replay.PlayerId)
+                    continue;
+                RunReplayInputStream inputs = ReplayMod.Storage.LoadInputStream(
+                    ReplayMod.Storage.ResolveRelativePath(manifest.InputFile));
+                bool changed = false;
+                _latestLiveReportedCount = Math.Max(_latestLiveReportedCount, batch.EventCount);
+                _latestLiveCompleted |= batch.Completed;
+                foreach (RaceReplayLiveEvent item in batch.Events)
+                {
+                    if (item.Index < inputs.Events.Count) continue;
+                    PendingLiveEvents[item.Index] = item;
+                }
+                while (PendingLiveEvents.Remove(inputs.Events.Count, out RaceReplayLiveEvent? item))
+                {
+                    inputs.Events.Add(new RunReplayInputEvent
+                    {
+                        Index = item.Index,
+                        ElapsedMs = item.ElapsedMs,
+                        Operation = item.Operation,
+                        Kind = item.Kind,
+                        Label = item.Label,
+                        Payload = item.Payload
+                    });
+                    changed = true;
+                }
+                if (changed)
+                    ReplayMod.Storage.SaveInputStream(ReplayMod.Storage.ResolveRelativePath(manifest.InputFile), inputs);
+                manifest.EventCount = inputs.Events.Count;
+                manifest.RaceElapsedMs = batch.RaceElapsedMs;
+                manifest.RaceElapsedUpdatedAtUnixMs = batch.RaceElapsedUpdatedAtUnixMs;
+                manifest.RaceTimerPaused = batch.RaceTimerPaused;
+                manifest.EventSlLimit = batch.EventSlLimit;
+                manifest.CombatSlLimit = batch.CombatSlLimit;
+                manifest.EventSlUsed = batch.EventSlUsed;
+                manifest.CombatSlUsed = batch.CombatSlUsed;
+                manifest.MarkerCount = Math.Max(manifest.MarkerCount, batch.MarkerCount);
+                if (_latestLiveCompleted && inputs.Events.Count >= _latestLiveReportedCount)
+                    manifest.Outcome = "COMPLETED";
+                return manifest;
+            }
+            if (!await LiveInboxSignal.WaitAsync(TimeSpan.FromSeconds(1), cancellationToken))
+            {
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (now - _lastLiveResubscribeAt >= 3000)
+                {
+                    _lastLiveResubscribeAt = now;
+                    await service.SubscribeReplayLiveAsync(replay.MatchId, replay.GameId, replay.PlayerId, cancellationToken);
+                }
                 return null;
-            var latest = (await service.GetMatchReplaysAsync(replay.MatchId, token))
-                .FirstOrDefault(x => x.GameId == replay.GameId && x.PlayerId == replay.PlayerId);
-            if (latest is null || (latest.UpdatedAt <= lastUpdated && latest.EventCount <= lastEventCount))
-                return null;
-            lastUpdated = latest.UpdatedAt;
-            lastEventCount = latest.EventCount;
-            return await DownloadAsync(latest, token);
-        });
-        await ReplayMod.RunPlayback.PlayAsync();
+            }
+        }
     }
 
     public static async Task WatchMatchAsync(SpectatableRace race, CancellationToken cancellationToken = default)
@@ -107,12 +197,18 @@ public static class RaceReplayCloudCoordinator
     {
         StartLiveUploadLoop(run);
         Schedule(run, TimeSpan.Zero);
+        PublishLive(run);
     }
-    private static void OnInputRecorded(RunReplayManifest run, RunReplayInputEvent input) => Schedule(run, TimeSpan.FromMilliseconds(200));
-    private static void OnCheckpointRecorded(RunReplayManifest run) => Schedule(run, TimeSpan.Zero);
+    private static void OnInputRecorded(RunReplayManifest run, RunReplayInputEvent input) => PublishLive(run, input);
+    private static void OnCheckpointRecorded(RunReplayManifest run)
+    {
+        Schedule(run, TimeSpan.Zero);
+        PublishLive(run);
+    }
     private static void OnRunFinalized(RunReplayManifest run)
     {
         StopLiveUploadLoop(run.RunId);
+        PublishLive(run);
         Schedule(run, TimeSpan.Zero);
     }
 
@@ -136,8 +232,8 @@ public static class RaceReplayCloudCoordinator
         {
             while (!lifetime.IsCancellationRequested && run.Outcome == "IN_PROGRESS")
             {
-                await Task.Delay(1000, lifetime.Token);
-                Schedule(run, TimeSpan.Zero);
+                await Task.Delay(500, lifetime.Token);
+                PublishLive(run);
             }
         }
         catch (OperationCanceledException) { }
@@ -149,6 +245,37 @@ public static class RaceReplayCloudCoordinator
                     LiveUploadLoops.Remove(run.RunId);
             }
             lifetime.Dispose();
+        }
+    }
+
+    private static void PublishLive(RunReplayManifest run, RunReplayInputEvent? input = null)
+    {
+        if (string.IsNullOrWhiteSpace(run.MatchId) || RaceServiceRegistry.Services.ConfiguredServerUri is null)
+            return;
+        _ = PublishLiveAsync(run, input);
+    }
+
+    private static async Task PublishLiveAsync(RunReplayManifest run, RunReplayInputEvent? input)
+    {
+        try
+        {
+            await LivePublishGate.WaitAsync();
+            try
+            {
+                ReplayMod.Recorder.RefreshRaceSnapshot();
+                RaceReplayLiveEvent[] events = input is null ? Array.Empty<RaceReplayLiveEvent>() :
+                [new(input.Index, input.ElapsedMs, input.Operation, input.Kind, input.Label, input.Payload)];
+                var batch = new RaceReplayLiveBatch(run.MatchId, run.GameId, run.PlayerId, run.TeamId, run.RunId,
+                    run.Character, run.EventCount, run.RaceElapsedMs, run.RaceElapsedUpdatedAtUnixMs,
+                    run.RaceTimerPaused, run.EventSlLimit, run.CombatSlLimit, run.EventSlUsed, run.CombatSlUsed,
+                    run.MarkerCount, run.Outcome != "IN_PROGRESS", events);
+                await ((IRaceReplayService)RaceServiceRegistry.Services).PublishReplayLiveAsync(batch);
+            }
+            finally { LivePublishGate.Release(); }
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"[SpireRaceReplay] Live action publication deferred: {exception.Message}");
         }
     }
 

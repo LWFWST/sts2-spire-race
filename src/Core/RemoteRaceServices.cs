@@ -87,6 +87,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     public event Action<string>? RoomExited;
     public event Action<RaceParty?>? PartyChanged;
     public event Action<RaceInvite>? InviteReceived;
+    public event Action<RaceReplayLiveBatch>? ReplayLiveUpdated;
 
     public async Task AuthenticateAsync(CancellationToken cancellationToken = default)
     {
@@ -665,6 +666,24 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         _ = await ReadAsync<JsonElement>(response, cancellationToken);
     }
 
+    public async Task PublishReplayLiveAsync(RaceReplayLiveBatch batch, CancellationToken cancellationToken = default)
+    {
+        await AuthenticateAsync(cancellationToken);
+        await SendSocketAsync("replay_live_batch", batch, cancellationToken);
+    }
+
+    public async Task SubscribeReplayLiveAsync(string matchId, string gameId, string playerId, CancellationToken cancellationToken = default)
+    {
+        await AuthenticateAsync(cancellationToken);
+        await SendSocketAsync("replay_subscribe", new { match_id = matchId, game_id = gameId, player_id = playerId }, cancellationToken);
+    }
+
+    public async Task UnsubscribeReplayLiveAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsAuthenticated || _socket?.State != WebSocketState.Open) return;
+        await SendSocketAsync("replay_unsubscribe", new { }, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<RaceReplaySummary>> GetMatchReplaysAsync(string matchId, CancellationToken cancellationToken = default) =>
         await GetAsync<RaceReplaySummary[]>($"v1/replays/match/{Uri.EscapeDataString(matchId)}", true, cancellationToken);
 
@@ -834,6 +853,10 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                         InviteReceived?.Invoke(new RaceInvite(invite.PlayerId, invite.DisplayName, invite.RoomCode, invite.PartyId,
                             invite.Kind == "ranked" ? QueueKind.Ranked : QueueKind.Casual,
                             Enum.IsDefined(typeof(TeamSize), invite.TeamSize) ? (TeamSize)invite.TeamSize : TeamSize.One));
+                        break;
+                    case "replay_live_batch":
+                        var liveBatch = data.Deserialize<RaceReplayLiveBatch>(Json);
+                        if (liveBatch is not null) ReplayLiveUpdated?.Invoke(liveBatch);
                         break;
                     case "save_quit_accepted": _saveQuitReply?.TrySetResult(true); break;
                     case "save_quit_rejected": _saveQuitReply?.TrySetException(new InvalidOperationException(data.ValueKind == JsonValueKind.String ? data.GetString() : "SL allowance exhausted")); break;

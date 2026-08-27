@@ -319,6 +319,33 @@ public sealed record RaceReplaySummary(
     bool IsPublic,
     DateTimeOffset UpdatedAt);
 
+public sealed record RaceReplayLiveEvent(
+    int Index,
+    long ElapsedMs,
+    int Operation,
+    string Kind,
+    string Label,
+    string Payload);
+
+public sealed record RaceReplayLiveBatch(
+    string MatchId,
+    string GameId,
+    string PlayerId,
+    string TeamId,
+    string RunId,
+    string CharacterId,
+    int EventCount,
+    long RaceElapsedMs,
+    long RaceElapsedUpdatedAtUnixMs,
+    bool RaceTimerPaused,
+    int EventSlLimit,
+    int CombatSlLimit,
+    int EventSlUsed,
+    int CombatSlUsed,
+    int MarkerCount,
+    bool Completed,
+    IReadOnlyList<RaceReplayLiveEvent> Events);
+
 public sealed record SpectatableRace(
     string MatchId,
     string GameId,

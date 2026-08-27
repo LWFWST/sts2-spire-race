@@ -247,6 +247,19 @@ public sealed class DemoRaceServices : IRaceServices
     public Task UploadReplayAsync(RaceReplaySummary replay, byte[] bundle, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
 
+    public event Action<RaceReplayLiveBatch>? ReplayLiveUpdated;
+
+    public Task PublishReplayLiveAsync(RaceReplayLiveBatch batch, CancellationToken cancellationToken = default)
+    {
+        ReplayLiveUpdated?.Invoke(batch);
+        return Task.CompletedTask;
+    }
+
+    public Task SubscribeReplayLiveAsync(string matchId, string gameId, string playerId, CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
+
+    public Task UnsubscribeReplayLiveAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
     public Task<IReadOnlyList<RaceReplaySummary>> GetMatchReplaysAsync(string matchId, CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<RaceReplaySummary>>(Array.Empty<RaceReplaySummary>());
 
