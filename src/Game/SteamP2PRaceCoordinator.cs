@@ -312,6 +312,18 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         cancellationToken.ThrowIfCancellationRequested();
         if (_lobby is null || CurrentMatch is null)
             return Task.CompletedTask;
+        if (_localProgress is { } previous && previous.MatchId == checkpoint.MatchId && previous.GameId == checkpoint.GameId)
+        {
+            checkpoint = checkpoint with
+            {
+                Floor = Math.Max(previous.Floor, checkpoint.Floor),
+                FloorEnteredAtMilliseconds = checkpoint.Floor < previous.Floor
+                    ? previous.FloorEnteredAtMilliseconds : checkpoint.FloorEnteredAtMilliseconds,
+                RestartCount = Math.Max(previous.RestartCount, checkpoint.RestartCount),
+                EventSlUsed = Math.Max(previous.EventSlUsed, checkpoint.EventSlUsed),
+                CombatSlUsed = Math.Max(previous.CombatSlUsed, checkpoint.CombatSlUsed)
+            };
+        }
         _localProgress = checkpoint;
         SteamMatchmaking.SetLobbyMemberData(_lobby.Value, MemberProgressKey, JsonSerializer.Serialize(checkpoint, Json));
         RefreshFromSteam();
@@ -709,7 +721,7 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         _seriesPreparingGameId = gameId;
         try
         {
-            await RaceSeriesTransition.PrepareNextGameAsync();
+            await RaceSeriesTransition.PrepareNextGameAsync(CurrentMatch?.GameId);
             CurrentMatch = null;
             MatchChanged?.Invoke(null);
             _launching = false;
@@ -911,7 +923,8 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
             seriesGames = existing;
         }
         var wire = new SettlementWire(winner, reason,
-            ToSide(first, "Team 1"), ToSide(second, "Team 2"), audit, DateTimeOffset.UtcNow, seriesGames);
+            ToSide(first, "Team 1"), ToSide(second, "Team 2"), audit, DateTimeOffset.UtcNow, seriesGames,
+            GetLobby(SessionKey), GetLobby(GameKey));
         SetLobby(SettlementKey, JsonSerializer.Serialize(wire, Json));
         SetLobby(StateKey, "completed");
         RefreshFromSteam();
@@ -922,6 +935,14 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         var wire = JsonSerializer.Deserialize<SettlementWire>(encoded, Json);
         if (wire is null)
             return;
+        var expectedMatchId = GetLobby(SessionKey);
+        var expectedGameId = GetLobby(GameKey);
+        if ((!string.IsNullOrEmpty(wire.MatchId) && wire.MatchId != expectedMatchId) ||
+            (!string.IsNullOrEmpty(wire.GameId) && wire.GameId != expectedGameId))
+        {
+            Log.Warn($"[SpireRace] Ignored stale Steam P2P settlement {wire.MatchId}/{wire.GameId}; active game is {expectedMatchId}/{expectedGameId}.");
+            return;
+        }
         if (CurrentMatch is null)
         {
             CurrentMatch = BuildAssignment();
@@ -929,7 +950,10 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
         }
         _appliedSettlement = encoded;
         var localFirst = wire.First.TeamId == CurrentMatch.LocalTeam.Id;
-        CurrentSettlement = new SettlementSnapshot(CurrentMatch.MatchId, CurrentMatch.GameId, wire.WinnerTeamId,
+        CurrentSettlement = new SettlementSnapshot(
+            string.IsNullOrEmpty(wire.MatchId) ? CurrentMatch.MatchId : wire.MatchId,
+            string.IsNullOrEmpty(wire.GameId) ? CurrentMatch.GameId : wire.GameId,
+            wire.WinnerTeamId,
             wire.Reason, localFirst ? wire.First : wire.Second, localFirst ? wire.Second : wire.First, 0,
             wire.SeriesGames ?? [], wire.AuditDetail, wire.CompletedAt);
         MatchSettled?.Invoke(CurrentSettlement);
@@ -1123,7 +1147,8 @@ public sealed class SteamP2PRaceCoordinator : IRaceEntertainmentP2PService, IDis
     }
 
     private sealed record SettlementWire(string WinnerTeamId, FinishReason Reason, SettlementSide First,
-        SettlementSide Second, string AuditDetail, DateTimeOffset CompletedAt, IReadOnlyList<LegendGameResult>? SeriesGames = null);
+        SettlementSide Second, string AuditDetail, DateTimeOffset CompletedAt, IReadOnlyList<LegendGameResult>? SeriesGames = null,
+        string MatchId = "", string GameId = "");
     private sealed record TeamSwapRequest(string PlayerId, int TargetTeam);
     private sealed record TeamSwapPlan(string Token, string FirstPlayerId, int FirstTargetTeam, string SecondPlayerId, int SecondTargetTeam);
 }

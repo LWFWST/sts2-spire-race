@@ -211,7 +211,8 @@ public sealed class ReplayRecorderCoordinator
             _run.EventSlUsed = RaceTelemetrySequence.EventSlUsed(match.GameId);
             _run.CombatSlUsed = RaceTelemetrySequence.CombatSlUsed(match.GameId);
         }
-        if (RaceServiceRegistry.Services is IRaceClockService { CurrentClock: { IsSynchronized: true } clock })
+        if (RaceServiceRegistry.Services is IRaceClockService { CurrentClock: { IsSynchronized: true } clock } &&
+            match is not null && clock.GameId == match.GameId)
         {
             _run.RaceElapsedMs = Math.Max(0, clock.ElapsedMilliseconds +
                 (clock.IsPaused ? 0 : now - clock.ServerUnixMilliseconds));

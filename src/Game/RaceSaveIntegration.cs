@@ -170,18 +170,30 @@ internal static class RaceSettlementWaiter
 {
     public static async Task<SettlementSnapshot?> SurrenderAndWaitAsync(IRaceMatchService matches)
     {
-        if (matches.CurrentSettlement is { } existing)
+        var expected = matches.CurrentMatch;
+        if (expected is null)
+            return null;
+        bool IsExpected(SettlementSnapshot value) =>
+            value.MatchId == expected.MatchId && value.GameId == expected.GameId;
+        if (matches.CurrentSettlement is { } existing && IsExpected(existing))
             return existing;
         var completion = new TaskCompletionSource<SettlementSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void Settled(SettlementSnapshot value) => completion.TrySetResult(value);
+        void Settled(SettlementSnapshot value)
+        {
+            if (IsExpected(value))
+                completion.TrySetResult(value);
+        }
         matches.MatchSettled += Settled;
         try
         {
             await matches.VoteSurrenderAsync(true);
-            if (matches.CurrentSettlement is { } immediate)
+            if (matches.CurrentSettlement is { } immediate && IsExpected(immediate))
                 return immediate;
             try { return await completion.Task.WaitAsync(TimeSpan.FromSeconds(8)); }
-            catch (TimeoutException) { return matches.CurrentSettlement; }
+            catch (TimeoutException)
+            {
+                return matches.CurrentSettlement is { } delayed && IsExpected(delayed) ? delayed : null;
+            }
         }
         finally
         {

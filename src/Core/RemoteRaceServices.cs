@@ -47,6 +47,14 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     private TaskCompletionSource<bool>? _saveQuitReply;
     private long? _localFinishPending;
     private DateTimeOffset _integrityVerifiedAt;
+    private MatchTransport _activeMatchTransport;
+
+    private enum MatchTransport
+    {
+        None,
+        Server,
+        SteamP2P
+    }
 
     public RemoteRaceServices(IRacePlatformIdentityProvider identityProvider, IRaceSessionLauncher? sessionLauncher = null, Uri? serverUri = null)
     {
@@ -126,6 +134,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     public async Task ChangeServerAsync(Uri? serverUri, CancellationToken cancellationToken = default)
     {
         var normalized = serverUri is null ? null : new Uri(serverUri.AbsoluteUri.TrimEnd('/') + "/");
+        if (_p2p?.CurrentRoom is not null)
+            await _p2p.LeaveRoomAsync(cancellationToken);
         var previousHttp = _http;
         _socketLifetime?.Cancel();
         if (_socket is not null)
@@ -145,8 +155,9 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         CurrentLegendDraft = null;
         CurrentRoom = null;
         CurrentParty = null;
+        _activeMatchTransport = MatchTransport.None;
         LastVerdict = IntegrityVerdict.Pending;
-        CurrentClock = new ServerClockSnapshot(0, 0, 0, 0, false);
+        ResetClockForMatch(null);
         _integrityVerifiedAt = default;
         _lastClockSyncLocalMilliseconds = 0;
         CurrentQueue = new QueueSnapshot(QueueState.Idle, Detail: "server_changed");
@@ -199,6 +210,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         if (request.Kind == QueueKind.Entertainment)
             throw new InvalidOperationException("Entertainment rooms do not use matchmaking.");
         RaceRules.Validate(request.Rules);
+        await SelectServerTransportAsync(cancellationToken);
         _queueRequest = request;
         _localTeam = await BuildLocalTeamAsync(request.TeamSize, cancellationToken);
         SetQueue(new QueueSnapshot(QueueState.Searching, request, _localTeam, Detail: "searching"));
@@ -442,8 +454,11 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         if (rules.CoordinationMode == "p2p")
         {
             if (_p2p is null) throw new InvalidOperationException("Steam P2P race coordination is unavailable.");
+            if (IsServerMatchInProgress) throw new InvalidOperationException("A server race is already in progress.");
+            SelectP2PTransport();
             return await _p2p.CreateRoomAsync(rules, cancellationToken);
         }
+        await SelectServerTransportAsync(cancellationToken);
         await EnsureOnlineReadyAsync(cancellationToken, verifyIntegrity: false);
         var room = await PostAsync<RoomDto>("v1/rooms", ToServerRules(rules), true, cancellationToken);
         return ApplyRoom(room);
@@ -451,6 +466,7 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
 
     public async Task<EntertainmentRoom> JoinRoomAsync(string code, CancellationToken cancellationToken = default)
     {
+        await SelectServerTransportAsync(cancellationToken);
         await EnsureOnlineReadyAsync(cancellationToken, verifyIntegrity: false);
         var room = await PostAsync<RoomDto>("v1/rooms/join", new { code }, true, cancellationToken);
         return ApplyRoom(room);
@@ -766,16 +782,29 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                     continue;
                 switch (type)
                 {
-                    case "match_found": ApplyAssignment(data.Deserialize<AssignmentDto>(Json)!, QueueState.ReadyCheck); break;
+                    case "match_found":
+                        if (_activeMatchTransport == MatchTransport.Server)
+                            ApplyAssignment(data.Deserialize<AssignmentDto>(Json)!, QueueState.ReadyCheck);
+                        break;
                     case "match_started":
+                        if (_activeMatchTransport != MatchTransport.Server)
+                            break;
                         ApplyAssignment(data.Deserialize<AssignmentDto>(Json)!, QueueState.Starting);
                         if (CurrentMatch is not null)
                             await RunOnMainThreadAsync(() => SessionLauncher.LaunchAsync(CurrentMatch, cancellationToken));
                         break;
                     case "clock":
-                        if (data.TryGetProperty("server_unix_ms", out var now))
+                        if (_activeMatchTransport == MatchTransport.Server && CurrentMatch is not null &&
+                            data.TryGetProperty("server_unix_ms", out var now))
                         {
+                            var clockMatchId = data.TryGetProperty("match_id", out var clockMatchElement)
+                                ? clockMatchElement.GetString() ?? string.Empty : string.Empty;
+                            var clockGameId = data.TryGetProperty("game_id", out var clockGameElement)
+                                ? clockGameElement.GetString() ?? string.Empty : string.Empty;
+                            if (clockMatchId != CurrentMatch.MatchId || clockGameId != CurrentMatch.GameId)
+                                break;
                             _clockOffsetMilliseconds = now.GetInt64() - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                            _lastClockSyncLocalMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                             if (data.TryGetProperty("elapsed_ms", out var elapsed))
                             {
                                 _clockElapsedAtServer = elapsed.GetInt64();
@@ -788,24 +817,47 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                     case "settlement": ApplySettlement(data.Deserialize<SettlementDto>(Json)!); break;
                     case "legend_game_settled":
                     case "series_game_settled":
-                        await RunOnMainThreadAsync(RaceSeriesTransition.PrepareNextGameAsync);
+                        var settledGame = data.Deserialize<LegendGameDto>(Json);
+                        if (_activeMatchTransport == MatchTransport.Server && settledGame is not null &&
+                            CurrentMatch is { } seriesMatch && settledGame.GameId == seriesMatch.GameId)
+                            await RunOnMainThreadAsync(() => RaceSeriesTransition.PrepareNextGameAsync(settledGame.GameId));
                         break;
                     case "finish_pending":
+                        if (_activeMatchTransport != MatchTransport.Server || CurrentMatch is null)
+                            break;
+                        var pendingMatchId = data.TryGetProperty("match_id", out var pendingMatchElement)
+                            ? pendingMatchElement.GetString() ?? string.Empty : string.Empty;
+                        var pendingGameId = data.TryGetProperty("game_id", out var pendingGameElement)
+                            ? pendingGameElement.GetString() ?? string.Empty : string.Empty;
+                        if (pendingMatchId != CurrentMatch.MatchId || pendingGameId != CurrentMatch.GameId)
+                            break;
                         _localFinishPending = data.TryGetProperty("completed_at_ms", out var completedAt) && completedAt.ValueKind == JsonValueKind.Number
                             ? completedAt.GetInt64() : null;
                         SetQueue(CurrentQueue with { State = QueueState.FinishPending, Detail = "finished_pending" });
                         break;
                     case "match_cancelled":
+                        var cancelledMatchId = data.TryGetProperty("match_id", out var cancelledIdElement)
+                            ? cancelledIdElement.GetString() ?? string.Empty : string.Empty;
+                        if (_activeMatchTransport != MatchTransport.Server || CurrentMatch is null ||
+                            (!string.IsNullOrEmpty(cancelledMatchId) && cancelledMatchId != CurrentMatch.MatchId))
+                            break;
                         CurrentMatch = null;
+                        ResetClockForMatch(null);
                         MatchChanged?.Invoke(null);
                         var cancellationReason = data.TryGetProperty("reason", out var reasonElement)
                             ? reasonElement.GetString() ?? "opponent_disconnected"
                             : "opponent_disconnected";
                         SetQueue(new QueueSnapshot(QueueState.Idle, _queueRequest, _localTeam, Detail: cancellationReason));
                         break;
-                    case "entertainment_room_updated": ApplyRoom(data.Deserialize<RoomDto>(Json)!); break;
-                    case "entertainment_room_starting": ApplyRoom(data.Deserialize<RoomDto>(Json)!); break;
+                    case "entertainment_room_updated":
+                        if (_activeMatchTransport == MatchTransport.Server) ApplyRoom(data.Deserialize<RoomDto>(Json)!);
+                        break;
+                    case "entertainment_room_starting":
+                        if (_activeMatchTransport == MatchTransport.Server) ApplyRoom(data.Deserialize<RoomDto>(Json)!);
+                        break;
                     case "entertainment_steam_lobby_required":
+                        if (_activeMatchTransport != MatchTransport.Server)
+                            break;
                         var roomLobby = data.Deserialize<EntertainmentLobbyRequiredDto>(Json)!;
                         var requiredRoom = ApplyRoom(roomLobby.Room);
                         if (SessionLauncher is IRaceSteamLobbyCoordinator roomCoordinator)
@@ -816,20 +868,23 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                         }
                         break;
                     case "entertainment_match_started":
+                        if (_activeMatchTransport != MatchTransport.Server)
+                            break;
                         var entertainmentLaunch = data.Deserialize<EntertainmentLaunchDto>(Json)!;
                         var launchRoom = ApplyRoom(entertainmentLaunch.Room);
-                        CurrentMatch = BuildEntertainmentAssignment(launchRoom, entertainmentLaunch.FirstSteamHostPlayerId,
+                        var entertainmentMatch = BuildEntertainmentAssignment(launchRoom, entertainmentLaunch.FirstSteamHostPlayerId,
                             entertainmentLaunch.FirstSteamLobbyId, entertainmentLaunch.SecondSteamLobbyId, entertainmentLaunch.SecondSteamHostPlayerId,
                             entertainmentLaunch.StartedAtMs);
-                        _localTeam = CurrentMatch.LocalTeam;
-                        _opponentTeam = CurrentMatch.OpponentTeam;
-                        _queueRequest = new QueueRequest(QueueKind.Entertainment, CurrentMatch.TeamSize, null, CurrentMatch.Rules);
-                        CurrentSettlement = null;
-                        MatchChanged?.Invoke(CurrentMatch);
+                        ActivateMatch(entertainmentMatch, MatchTransport.Server);
+                        _localTeam = entertainmentMatch.LocalTeam;
+                        _opponentTeam = entertainmentMatch.OpponentTeam;
+                        _queueRequest = new QueueRequest(QueueKind.Entertainment, entertainmentMatch.TeamSize, null, entertainmentMatch.Rules);
                         SetQueue(new QueueSnapshot(QueueState.Starting, _queueRequest, _localTeam, _opponentTeam, Detail: "starting"));
-                        await RunOnMainThreadAsync(() => SessionLauncher.LaunchAsync(CurrentMatch, cancellationToken));
+                        await RunOnMainThreadAsync(() => SessionLauncher.LaunchAsync(entertainmentMatch, cancellationToken));
                         break;
                     case "entertainment_room_closed":
+                        if (_activeMatchTransport != MatchTransport.Server)
+                            break;
                         CurrentRoom = null;
                         RoomChanged?.Invoke(null);
                         RoomExited?.Invoke("host_closed");
@@ -840,6 +895,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                         PartyChanged?.Invoke(null);
                         break;
                     case "steam_lobby_required":
+                        if (_activeMatchTransport != MatchTransport.Server)
+                            break;
                         var lobbyAssignment = data.Deserialize<AssignmentDto>(Json)!;
                         ApplyAssignment(lobbyAssignment, QueueState.Starting);
                         if (SessionLauncher is IRaceSteamLobbyCoordinator coordinator)
@@ -860,8 +917,12 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
                         break;
                     case "save_quit_accepted": _saveQuitReply?.TrySetResult(true); break;
                     case "save_quit_rejected": _saveQuitReply?.TrySetException(new InvalidOperationException(data.ValueKind == JsonValueKind.String ? data.GetString() : "SL allowance exhausted")); break;
-                    case "legend_ban_required": ApplyLegendPrompt(data, true); break;
-                    case "legend_pick_required": ApplyLegendPrompt(data, false); break;
+                    case "legend_ban_required":
+                        if (_activeMatchTransport == MatchTransport.Server) ApplyLegendPrompt(data, true);
+                        break;
+                    case "legend_pick_required":
+                        if (_activeMatchTransport == MatchTransport.Server) ApplyLegendPrompt(data, false);
+                        break;
                 }
             }
         }
@@ -929,9 +990,6 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
 
     private void ApplyAssignment(AssignmentDto dto, QueueState state)
     {
-        _clockElapsedAtServer = -1;
-        _clockElapsedServerUnixMilliseconds = 0;
-        _clockPaused = false;
         var identityId = (_identity?.PlatformId ?? 0).ToString();
         var localFirst = dto.FirstPlayerIds.Contains(identityId);
         var localIds = localFirst ? dto.FirstPlayerIds : dto.SecondPlayerIds;
@@ -944,17 +1002,21 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
             _queueRequest = new QueueRequest(kind, (TeamSize)dto.TeamSize, null, rules);
         else
             _queueRequest ??= new QueueRequest(kind, (TeamSize)dto.TeamSize, RaceRules.PoolFor((TeamSize)dto.TeamSize), rules);
-        CurrentMatch = new MatchAssignment(dto.MatchId, dto.GameId, dto.GameVersion, kind, (TeamSize)dto.TeamSize, rules,
+        var assignment = new MatchAssignment(dto.MatchId, dto.GameId, dto.GameVersion, kind, (TeamSize)dto.TeamSize, rules,
             _localTeam, _opponentTeam, dto.Rules.CharacterId, dto.SessionNonce, dto.StartedAtMs, null, dto.CharacterIds,
             dto.FirstSteamHostPlayerId, dto.SecondSteamHostPlayerId, dto.FirstSteamLobbyId, dto.SecondSteamLobbyId);
-        MatchChanged?.Invoke(CurrentMatch);
+        ActivateMatch(assignment, MatchTransport.Server);
         SetQueue(new QueueSnapshot(state, _queueRequest, _localTeam, _opponentTeam, Detail: state == QueueState.MatchFound ? "match_found" : "starting"));
     }
 
     private void ApplySettlement(SettlementDto dto)
     {
-        if (CurrentMatch is null || _localTeam is null || _opponentTeam is null)
+        if (_activeMatchTransport != MatchTransport.Server || CurrentMatch is null || _localTeam is null || _opponentTeam is null ||
+            dto.MatchId != CurrentMatch.MatchId || dto.GameId != CurrentMatch.GameId)
+        {
+            Log.Warn($"[SpireRace] Ignored stale server settlement {dto.MatchId}/{dto.GameId}; active transport/game is {_activeMatchTransport}/{CurrentMatch?.MatchId}/{CurrentMatch?.GameId}.");
             return;
+        }
         var localSide = dto.First.TeamId == _localTeam.Id ? dto.First : dto.Second;
         var enemySide = dto.First.TeamId == _localTeam.Id ? dto.Second : dto.First;
         var games = (dto.SeriesGames ?? Array.Empty<LegendGameDto>()).Select(x => new LegendGameResult(
@@ -992,13 +1054,63 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
 
     private void UpdateClock(long roundTrip)
     {
+        if (_activeMatchTransport != MatchTransport.Server || CurrentMatch is null)
+            return;
+        var match = CurrentMatch;
+        if (match is null)
+            return;
         var serverNow = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + _clockOffsetMilliseconds;
-        var started = CurrentMatch?.StartedAtUnixMilliseconds ?? 0;
+        var started = match.StartedAtUnixMilliseconds;
         var elapsed = _clockElapsedAtServer >= 0
             ? _clockElapsedAtServer + (_clockPaused ? 0 : Math.Max(0, serverNow - _clockElapsedServerUnixMilliseconds))
             : started == 0 ? 0 : Math.Max(0, serverNow - started);
-        CurrentClock = new ServerClockSnapshot(serverNow, started, elapsed, roundTrip, _lastClockSyncLocalMilliseconds != 0, _clockPaused);
+        CurrentClock = new ServerClockSnapshot(serverNow, started, elapsed, roundTrip, _lastClockSyncLocalMilliseconds != 0, _clockPaused, match.GameId);
         ClockChanged?.Invoke(CurrentClock);
+    }
+
+    private void ResetClockForMatch(MatchAssignment? match)
+    {
+        _clockElapsedAtServer = -1;
+        _clockElapsedServerUnixMilliseconds = 0;
+        _clockPaused = false;
+        _lastClockSyncLocalMilliseconds = 0;
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var started = match?.StartedAtUnixMilliseconds ?? 0;
+        var elapsed = started > 0 ? Math.Max(0, now - started) : 0;
+        CurrentClock = new ServerClockSnapshot(now, started, elapsed, 0, false, false, match?.GameId ?? string.Empty);
+        ClockChanged?.Invoke(CurrentClock);
+    }
+
+    private void ActivateMatch(MatchAssignment assignment, MatchTransport transport)
+    {
+        _activeMatchTransport = transport;
+        CurrentMatch = assignment;
+        CurrentSettlement = null;
+        _localFinishPending = null;
+        ResetClockForMatch(assignment);
+        MatchChanged?.Invoke(assignment);
+    }
+
+    private async Task SelectServerTransportAsync(CancellationToken cancellationToken)
+    {
+        if (_p2p?.CurrentRoom is not null)
+            await _p2p.LeaveRoomAsync(cancellationToken);
+        _activeMatchTransport = MatchTransport.Server;
+        CurrentMatch = null;
+        CurrentSettlement = null;
+        CurrentLegendDraft = null;
+        ResetClockForMatch(null);
+        MatchChanged?.Invoke(null);
+    }
+
+    private void SelectP2PTransport()
+    {
+        _activeMatchTransport = MatchTransport.SteamP2P;
+        CurrentMatch = null;
+        CurrentSettlement = null;
+        CurrentLegendDraft = null;
+        ResetClockForMatch(null);
+        MatchChanged?.Invoke(null);
     }
 
     private async Task SendSocketAsync(string type, object data, CancellationToken cancellationToken)
@@ -1122,14 +1234,26 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
         RoomChanged?.Invoke(room);
         return room;
     }
-    private bool IsP2PMatch => CurrentMatch is { Kind: QueueKind.Entertainment, Rules.CoordinationMode: "p2p" } && _p2p is not null;
+    private bool IsP2PMatch => _activeMatchTransport == MatchTransport.SteamP2P &&
+        CurrentMatch is { Kind: QueueKind.Entertainment, Rules.CoordinationMode: "p2p" } && _p2p is not null;
+    private bool IsServerMatchInProgress => _activeMatchTransport == MatchTransport.Server &&
+        CurrentQueue.State is QueueState.Searching or QueueState.MatchFound or QueueState.ReadyCheck or QueueState.Lobby or
+            QueueState.Starting or QueueState.Draft or QueueState.FinishPending;
     private void OnP2PRoomChanged(EntertainmentRoom? room)
     {
+        if (IsServerMatchInProgress)
+            return;
+        if (room is not null && _activeMatchTransport != MatchTransport.SteamP2P)
+            SelectP2PTransport();
+        if (room is null && _activeMatchTransport != MatchTransport.SteamP2P)
+            return;
         CurrentRoom = room;
         RoomChanged?.Invoke(room);
     }
     private void OnP2PRoomExited(string reason)
     {
+        if (_activeMatchTransport != MatchTransport.SteamP2P)
+            return;
         CurrentRoom = null;
         RoomChanged?.Invoke(null);
         if (reason == "launch_failed")
@@ -1138,21 +1262,37 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
     }
     private void OnP2PMatchChanged(MatchAssignment? match)
     {
-        CurrentMatch = match;
+        if (match is null)
+        {
+            if (_activeMatchTransport != MatchTransport.SteamP2P)
+                return;
+            CurrentMatch = null;
+            ResetClockForMatch(null);
+            MatchChanged?.Invoke(null);
+            return;
+        }
+        if (IsServerMatchInProgress)
+        {
+            Log.Warn($"[SpireRace] Ignored stale P2P match callback for {match.MatchId}/{match.GameId} while a server match is active.");
+            return;
+        }
+        ActivateMatch(match, MatchTransport.SteamP2P);
         if (match is not null)
         {
             _localTeam = match.LocalTeam;
             _opponentTeam = match.OpponentTeam;
             _queueRequest = new QueueRequest(QueueKind.Entertainment, match.TeamSize, null, match.Rules);
-            CurrentSettlement = null;
             SetQueue(new QueueSnapshot(QueueState.Starting, _queueRequest, _localTeam, _opponentTeam, Detail: "p2p_starting"));
         }
-        MatchChanged?.Invoke(match);
     }
     private void OnP2PMatchSettled(SettlementSnapshot settlement)
     {
-        if (CurrentMatch is null)
+        if (_activeMatchTransport != MatchTransport.SteamP2P || CurrentMatch is null ||
+            settlement.MatchId != CurrentMatch.MatchId || settlement.GameId != CurrentMatch.GameId)
+        {
+            Log.Warn($"[SpireRace] Ignored stale P2P settlement {settlement.MatchId}/{settlement.GameId}; active transport/game is {_activeMatchTransport}/{CurrentMatch?.MatchId}/{CurrentMatch?.GameId}.");
             return;
+        }
         CurrentSettlement = settlement;
         MatchSettled?.Invoke(settlement);
         var localTime = settlement.Local.CompletionMilliseconds is { } localMs ? TimeSpan.FromMilliseconds(localMs) : (TimeSpan?)null;
@@ -1166,6 +1306,8 @@ public sealed class RemoteRaceServices : IRaceServices, IRaceAuthService, IRaceC
 
     private void OnP2PLegendDraftChanged(LegendDraftPrompt? prompt)
     {
+        if (_activeMatchTransport != MatchTransport.SteamP2P)
+            return;
         CurrentLegendDraft = prompt;
         LegendDraftChanged?.Invoke(prompt);
         if (prompt is not null)

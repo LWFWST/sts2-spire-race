@@ -19,7 +19,11 @@ internal static class RaceActiveSession
     public static void Begin(MatchAssignment assignment)
     {
         lock (Sync)
+        {
+            if (_current?.GameId != assignment.GameId)
+                RaceTelemetrySequence.BeginGame(assignment.GameId);
             _current = assignment;
+        }
     }
 
     public static void Clear(string? gameId = null)

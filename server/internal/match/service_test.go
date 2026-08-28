@@ -123,6 +123,42 @@ func TestSingleBossFinishWaitsForOpponent(t *testing.T) {
 	}
 }
 
+func TestDeathKeepScoreWaitsAndThenSettlesCurrentGame(t *testing.T) {
+	repo, notify := &fakeRepository{}, &fakeNotifier{}
+	service := New(repo, notify)
+	a := createStarted(t, service,
+		request("a", domain.QueueCasual, 1, "Gold", "a"),
+		request("b", domain.QueueCasual, 1, "Gold", "b"))
+	first := domain.Progress{MatchID: a.MatchID, GameID: a.GameID, TeamID: a.FirstTeamID,
+		Sequence: 1, Floor: 24, FloorEnteredAtMS: 12_345, Outcome: domain.OutcomeScoreLocked}
+	if err := service.Progress(context.Background(), "a", "keep-a", first); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.settlements) != 0 {
+		t.Fatal("a score-locked player settled while the opponent was still active")
+	}
+	notify.mu.Lock()
+	foundPending := false
+	for _, event := range notify.events {
+		if event == "finish_pending" {
+			foundPending = true
+		}
+	}
+	notify.mu.Unlock()
+	if !foundPending {
+		t.Fatal("score-locked player did not receive finish_pending")
+	}
+	second := domain.Progress{MatchID: a.MatchID, GameID: a.GameID, TeamID: a.SecondTeamID,
+		Sequence: 1, Floor: 20, FloorEnteredAtMS: 15_000, Outcome: domain.OutcomeScoreLocked}
+	if err := service.Progress(context.Background(), "b", "keep-b", second); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.settlements) != 1 || repo.settlements[0].GameID != a.GameID ||
+		repo.settlements[0].WinnerTeamID != a.FirstTeamID {
+		t.Fatalf("death result was not persisted for the active game: %+v", repo.settlements)
+	}
+}
+
 func TestUnstartedMatchExpiresAndAllowsBothPlayersToLeave(t *testing.T) {
 	notify := &fakeNotifier{}
 	service := New(&fakeRepository{}, notify)
@@ -221,6 +257,9 @@ func TestEntertainmentPauseOnSaveClockFreezesAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := service.ClockForPlayer("a")
+	if clock["match_id"] != a.MatchID || clock["game_id"] != a.GameID {
+		t.Fatalf("clock snapshot was not scoped to the active game: %+v", clock)
+	}
 	if paused, _ := clock["paused"].(bool); !paused {
 		t.Fatalf("pause-on-save clock was not marked paused: %+v", clock)
 	}

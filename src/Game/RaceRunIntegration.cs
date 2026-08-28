@@ -134,6 +134,11 @@ public sealed partial class RaceRunIntegration : Node
 
     private void OnMatchSettled(SettlementSnapshot settlement)
     {
+        if (settlement.MatchId != _match.MatchId || settlement.GameId != _match.GameId)
+        {
+            Log.Warn($"[SpireRace] Ignored settlement for stale game {settlement.MatchId}/{settlement.GameId}; active game is {_match.MatchId}/{_match.GameId}.");
+            return;
+        }
         Callable.From(() => RaceSettlementOverlay.Show(_matches, settlement)).CallDeferred();
     }
 
@@ -194,7 +199,7 @@ public sealed partial class RaceRunIntegration : Node
     {
         if (IsP2PEntertainment)
             return Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _match.StartedAtUnixMilliseconds);
-        if (_clock?.CurrentClock is { IsSynchronized: true } snapshot)
+        if (_clock?.CurrentClock is { IsSynchronized: true } snapshot && snapshot.GameId == _match.GameId)
             return Math.Max(0, snapshot.ElapsedMilliseconds +
                 (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - snapshot.ServerUnixMilliseconds));
         return RunManager.Instance.RunTime * 1000;
@@ -306,16 +311,25 @@ public sealed partial class RaceRunHud : Control
         if (_refreshTimer is not null) _refreshTimer.Timeout -= Refresh;
     }
 
-    private void OnClockChanged(ServerClockSnapshot snapshot) { _snapshot = snapshot; _snapshotAtTicks = checked((long)Time.GetTicksMsec()); }
+    private void OnClockChanged(ServerClockSnapshot snapshot)
+    {
+        if (!string.IsNullOrEmpty(snapshot.GameId) && snapshot.GameId != _match.GameId)
+            return;
+        _snapshot = snapshot;
+        _snapshotAtTicks = checked((long)Time.GetTicksMsec());
+    }
     private void Refresh()
     {
         if (_label is null) return;
         var now = checked((long)Time.GetTicksMsec());
-        var elapsed = _snapshot.IsSynchronized
-            ? _snapshot.ElapsedMilliseconds + (_snapshot.IsPaused ? 0 : now - _snapshotAtTicks)
-            : _match.Kind == QueueKind.Entertainment && _match.Rules.CoordinationMode == "p2p"
-                ? Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _match.StartedAtUnixMilliseconds)
-                : Math.Max(0, now - _localStartedAtTicks);
+        var isP2P = _match.Kind == QueueKind.Entertainment && _match.Rules.CoordinationMode == "p2p";
+        var elapsed = isP2P
+            ? Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _match.StartedAtUnixMilliseconds)
+            : _snapshot.IsSynchronized && _snapshot.GameId == _match.GameId
+                ? _snapshot.ElapsedMilliseconds + (_snapshot.IsPaused ? 0 : now - _snapshotAtTicks)
+                : _match.StartedAtUnixMilliseconds > 0
+                    ? Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _match.StartedAtUnixMilliseconds)
+                    : Math.Max(0, now - _localStartedAtTicks);
         var eventRemaining = Math.Max(0, _match.Rules.EventSlLimit - _eventSlUsed);
         var combatRemaining = Math.Max(0, _match.Rules.CombatSlLimit - _combatSlUsed);
         _label.SetTextAutoSize($"RACE  {RaceRules.FormatElapsed(elapsed)}     F{_floor}     A{_match.Rules.Ascension}     SL  {eventRemaining}E / {combatRemaining}C");
@@ -386,6 +400,12 @@ public sealed partial class RaceSettlementOverlay : Control
 
     public static void Show(IRaceMatchService matches, SettlementSnapshot settlement)
     {
+        var active = RaceActiveSession.Current;
+        if (active is not null && (active.MatchId != settlement.MatchId || active.GameId != settlement.GameId))
+        {
+            Log.Warn($"[SpireRace] Did not attach stale settlement overlay {settlement.MatchId}/{settlement.GameId} to active run {active.MatchId}/{active.GameId}.");
+            return;
+        }
         var globalUi = NRun.Instance?.GlobalUi;
         if (globalUi is null || globalUi.GetNodeOrNull<Node>("SpireRaceSettlement") is not null)
             return;
@@ -456,7 +476,7 @@ public sealed partial class RaceSettlementOverlay : Control
 
     private async Task ReturnToMenuAsync()
     {
-        RaceActiveSession.Clear();
+        RaceActiveSession.Clear(_settlement.GameId);
         QueueFree();
         if (NGame.Instance is not null)
             await NGame.Instance.ReturnToMainMenu();
@@ -476,6 +496,13 @@ internal static class RaceTelemetrySequence
     private static readonly ConcurrentDictionary<string, int> RestartCounts = new();
     private static readonly ConcurrentDictionary<string, int> EventSlCounts = new();
     private static readonly ConcurrentDictionary<string, int> CombatSlCounts = new();
+    public static void BeginGame(string gameId)
+    {
+        Sequences.TryRemove(gameId, out _);
+        RestartCounts.TryRemove(gameId, out _);
+        EventSlCounts.TryRemove(gameId, out _);
+        CombatSlCounts.TryRemove(gameId, out _);
+    }
     public static long Next(string gameId) => Sequences.AddOrUpdate(gameId, 1, (_, value) => value + 1);
     public static int Restarts(string gameId) => RestartCounts.GetValueOrDefault(gameId);
     public static int IncrementRestarts(string gameId) => RestartCounts.AddOrUpdate(gameId, 1, (_, value) => value + 1);

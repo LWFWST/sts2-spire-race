@@ -436,11 +436,13 @@ func (s *Service) Progress(ctx context.Context, playerID, idempotency string, p 
 	opponent, opponentOK := st.Progress[opponentTeamID]
 	finishPending := p.FinalBossDefeated && p.Outcome == domain.OutcomeFinished &&
 		(!opponentOK || opponent.Outcome == "" || opponent.Outcome == domain.OutcomeActive)
+	scorePending := p.Outcome == domain.OutcomeScoreLocked &&
+		(!opponentOK || opponent.Outcome == "" || opponent.Outcome == domain.OutcomeActive)
 	team := append([]string{}, teamPlayers(st.Assignment, teamID)...)
 	s.mu.Unlock()
 	if notifier != nil {
 		notifier.Broadcast(players, "progress", p)
-		if finishPending {
+		if finishPending || scorePending {
 			notifier.Broadcast(team, "finish_pending", p)
 		}
 	}
@@ -858,7 +860,12 @@ func (s *Service) ClockForPlayer(playerID string) map[string]any {
 	now := time.Now().UnixMilli()
 	result := map[string]any{"server_unix_ms": now}
 	st, teamID, err := s.stateForPlayer(playerID)
-	if err != nil || st.Assignment.StartedAtMS == 0 {
+	if err != nil {
+		return result
+	}
+	result["match_id"] = st.Assignment.MatchID
+	result["game_id"] = st.Assignment.GameID
+	if st.Assignment.StartedAtMS == 0 {
 		return result
 	}
 	result["match_started_ms"] = st.Assignment.StartedAtMS

@@ -187,7 +187,8 @@ public sealed record ServerClockSnapshot(
     long ElapsedMilliseconds,
     long RoundTripMilliseconds,
     bool IsSynchronized,
-    bool IsPaused = false);
+    bool IsPaused = false,
+    string GameId = "");
 
 public sealed record ProgressCheckpoint(
     string MatchId,
